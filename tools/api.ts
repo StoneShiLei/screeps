@@ -19,8 +19,28 @@ function token(): string {
   return cachedToken;
 }
 
+/**
+ * 官方 API 有速率限制，超了会返回 429。响应头里带着配额重置时间，
+ * 按它等待再重试，比盲目 sleep 靠谱。
+ */
+async function request(path: string, init?: RequestInit, attempt = 0): Promise<Response> {
+  const response = await fetch(`${API}${path}`, {
+    ...init,
+    headers: { "X-Token": token(), ...(init?.headers ?? {}) }
+  });
+
+  if (response.status !== 429 || attempt >= 3) return response;
+
+  const reset = Number(response.headers.get("x-ratelimit-reset"));
+  const waitMs = reset ? Math.max(reset * 1000 - Date.now(), 0) + 2000 : 60_000;
+  console.log(`  触发限流，等待 ${Math.ceil(waitMs / 1000)} 秒后重试...`);
+  await new Promise(resolve => setTimeout(resolve, waitMs));
+
+  return request(path, init, attempt + 1);
+}
+
 export async function apiGet<T = any>(path: string): Promise<T> {
-  const response = await fetch(`${API}${path}`, { headers: { "X-Token": token() } });
+  const response = await request(path);
   if (!response.ok) throw new Error(`HTTP ${response.status} ${path}`);
   return (await response.json()) as T;
 }
@@ -58,11 +78,12 @@ export interface RoomStatus {
 export async function fetchMapStats(rooms: string[]): Promise<Record<string, RoomStatus>> {
   const result: Record<string, RoomStatus> = {};
 
-  for (let i = 0; i < rooms.length; i += 200) {
-    const batch = rooms.slice(i, i + 200);
-    const response = await fetch(`${API}/game/map-stats`, {
+  // 一次塞满一点，map-stats 的每小时配额比 GET 接口紧张得多
+  for (let i = 0; i < rooms.length; i += 500) {
+    const batch = rooms.slice(i, i + 500);
+    const response = await request("/game/map-stats", {
       method: "POST",
-      headers: { "X-Token": token(), "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ rooms: batch, statName: "owner0", shard: SHARD })
     });
     if (!response.ok) throw new Error(`HTTP ${response.status} map-stats`);

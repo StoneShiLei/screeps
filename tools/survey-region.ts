@@ -40,8 +40,9 @@ async function main(): Promise<void> {
 
   console.log(`查询 ${names.length} 个房间...`);
   const stats = await fetchMapStats(names);
+  const now = Date.now();
 
-  console.log("\n. 无主可占领   o 无主但不可占领   数字 已占领房间的 RCL   空白 地图外\n");
+  console.log("\n. 可以去   N 新手区（GCL 4 以上进不去）   o 高速路或 SK 房   数字 已占领房间的 RCL   空白 地图外\n");
 
   // 表头：x 坐标的十位和个位
   let tens = "     ";
@@ -53,43 +54,53 @@ async function main(): Promise<void> {
   console.log(tens);
   console.log(ones);
 
-  const sectorFree = new Map<string, { free: number; owned: number }>();
+  const sectors = new Map<string, { free: number; novice: number; owned: number }>();
 
   for (let y = yFrom; y <= yTo; y++) {
     let line = `${vertical}${String(y).padStart(2)}  `;
     for (let x = xFrom; x <= xTo; x++) {
       const info = stats[`${horizontal}${x}${vertical}${y}`];
       const sector = `${Math.floor(x / 10)}-${Math.floor(y / 10)}`;
-      const bucket = sectorFree.get(sector) ?? { free: 0, owned: 0 };
+      const bucket = sectors.get(sector) ?? { free: 0, novice: 0, owned: 0 };
 
       if (!info || info.status !== "normal") {
         line += " ";
-      } else if (info.own) {
+        continue;
+      }
+
+      if (info.own) {
         line += Math.min(info.own.level, 9);
         bucket.owned++;
-        sectorFree.set(sector, bucket);
-      } else if (isClaimable(x, y)) {
+      } else if (!isClaimable(x, y)) {
+        line += "o";
+      } else if (info.novice && info.novice > now) {
+        // 新手区只对 GCL 4 以下开放，对我们等于不存在
+        line += "N";
+        bucket.novice++;
+      } else {
         line += ".";
         bucket.free++;
-        sectorFree.set(sector, bucket);
-      } else {
-        line += "o";
       }
+
+      sectors.set(sector, bucket);
     }
     console.log(line);
   }
 
-  const ranked = [...sectorFree.entries()]
-    .map(([sector, counts]) => ({ sector, ...counts, rate: counts.owned / (counts.free + counts.owned) }))
-    .filter(s => s.free + s.owned >= 10)
-    .sort((a, b) => a.rate - b.rate);
+  const ranked = [...sectors.entries()]
+    .map(([sector, counts]) => ({ sector, ...counts }))
+    .filter(s => s.free >= 5)
+    .sort((a, b) => b.free - a.free);
 
-  console.log("\n各扇区占领率（越低越空，扇区编号是 x十位-y十位）：");
-  for (const s of ranked.slice(0, 12)) {
-    const bar = "#".repeat(Math.round(s.rate * 20)).padEnd(20, "-");
+  console.log("\n各扇区实际可去的无主房间数（已排除新手区，扇区编号是 x十位-y十位）：");
+  for (const s of ranked.slice(0, 15)) {
+    const total = s.free + s.owned;
+    const rate = total ? s.owned / total : 0;
+    const bar = "#".repeat(Math.round(rate * 20)).padEnd(20, "-");
+    const [sx, sy] = s.sector.split("-");
     console.log(
-      `  ${horizontal}${s.sector.split("-")[0]}0${vertical}${s.sector.split("-")[1]}0 一带  ` +
-        `${bar} ${(s.rate * 100).toFixed(0).padStart(3)}%   无主 ${String(s.free).padStart(2)} / 已占 ${s.owned}`
+      `  ${horizontal}${sx}0${vertical}${sy}0 一带  ${bar} 占领率 ${(rate * 100).toFixed(0).padStart(3)}%   ` +
+        `可去 ${String(s.free).padStart(2)}   已占 ${String(s.owned).padStart(2)}   新手区 ${s.novice}`
     );
   }
 }
