@@ -7,6 +7,7 @@
     "outDir": "dist",
     "baseUrl": "src/",
     "sourceMap": true,
+    "newLine": "lf",
     "strict": true,
     "experimentalDecorators": true,
     "noImplicitReturns": true,
