@@ -1,6 +1,7 @@
 import { ErrorMapper } from "utils/ErrorMapper";
 import { runHarvester } from "roles/harvester";
 import { runSpawnManager } from "managers/spawnManager";
+import { runUpgrader } from "roles/upgrader";
 
 // ErrorMapper 用 source map 把报错行号还原成 TypeScript 源码的位置，
 // 否则游戏控制台里显示的都是打包后 main.js 的行号。
@@ -21,6 +22,9 @@ export const loop = ErrorMapper.wrapLoop(() => {
     switch (creep.memory.role) {
       case "harvester":
         runHarvester(creep);
+        break;
+      case "upgrader":
+        runUpgrader(creep);
         break;
       default:
         creep.say("无角色");

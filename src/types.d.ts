@@ -5,7 +5,7 @@
  * 里的同名 interface 合并，成为全局类型。往 Memory 里存新字段时，先在这里声明。
  */
 
-type CreepRole = "harvester";
+type CreepRole = "harvester" | "upgrader";
 
 interface CreepMemory {
   role: CreepRole;

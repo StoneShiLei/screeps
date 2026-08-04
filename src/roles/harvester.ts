@@ -1,51 +1,20 @@
 /**
- * harvester：目前房间里唯一的角色。
- * 在能量源和 spawn / extension 之间往返搬运，两边都满了就临时去升级 controller。
+ * harvester：把能量从 source 搬进 spawn 和 extension。
+ *
+ * 升级 controller 的活已经交给 upgrader，这里只保留一个兜底：
+ * 所有储能建筑都满了的时候顺手升级一下，免得 creep 干站着把寿命耗光。
  */
 
+import { gatherEnergy, refreshEnergyState } from "utils/energy";
+
 export function runHarvester(creep: Creep): void {
-  updateWorkingState(creep);
+  refreshEnergyState(creep, "运输");
 
   if (creep.memory.working) {
     deliverEnergy(creep);
   } else {
-    harvestEnergy(creep);
+    gatherEnergy(creep);
   }
-}
-
-/** 空了就去采集，满了就去送货 */
-function updateWorkingState(creep: Creep): void {
-  if (creep.memory.working && creep.store[RESOURCE_ENERGY] === 0) {
-    creep.memory.working = false;
-    creep.say("采集");
-  } else if (!creep.memory.working && creep.store.getFreeCapacity() === 0) {
-    creep.memory.working = true;
-    creep.say("运输");
-  }
-}
-
-function harvestEnergy(creep: Creep): void {
-  const source = findSource(creep);
-  if (!source) return;
-
-  if (creep.harvest(source) === ERR_NOT_IN_RANGE) {
-    creep.moveTo(source, { visualizePathStyle: { stroke: "#ffaa00" } });
-  }
-}
-
-/**
- * findClosestByPath 每次调用都要跑一遍寻路，是 Screeps 里最常见的 CPU 浪费来源，
- * 所以把结果记在 memory 里，只有能量源枯竭时才重新找。
- */
-function findSource(creep: Creep): Source | null {
-  if (creep.memory.sourceId) {
-    const cached = Game.getObjectById(creep.memory.sourceId);
-    if (cached && cached.energy > 0) return cached;
-  }
-
-  const source = creep.pos.findClosestByPath(FIND_SOURCES_ACTIVE);
-  creep.memory.sourceId = source?.id;
-  return source;
 }
 
 function deliverEnergy(creep: Creep): void {
@@ -56,21 +25,17 @@ function deliverEnergy(creep: Creep): void {
   });
 
   const target = creep.pos.findClosestByPath(targets);
-  if (target) {
-    if (creep.transfer(target, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) {
-      creep.moveTo(target, { visualizePathStyle: { stroke: "#ffffff" } });
-    }
+  if (!target) {
+    dumpIntoController(creep);
     return;
   }
 
-  upgradeController(creep);
+  if (creep.transfer(target, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) {
+    creep.moveTo(target, { visualizePathStyle: { stroke: "#ffffff" } });
+  }
 }
 
-/**
- * 能量无处可放时的兜底，免得 creep 干站着浪费寿命。
- * 等 upgrader 角色拆出来之后这里就可以去掉了。
- */
-function upgradeController(creep: Creep): void {
+function dumpIntoController(creep: Creep): void {
   const controller = creep.room.controller;
   if (!controller) return;
 
