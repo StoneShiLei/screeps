@@ -87,3 +87,8 @@ $RECYCLE.BIN/
 
 # Windows shortcuts
 *.lnk
+
+# 本地工具脚本的输出
+room-map.txt
+scan-result.txt
+scan.txt
