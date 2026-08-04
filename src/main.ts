@@ -1,41 +1,38 @@
 import { ErrorMapper } from "utils/ErrorMapper";
+import { runHarvester } from "roles/harvester";
+import { runSpawnManager } from "managers/spawnManager";
 
-declare global {
-  /*
-    Example types, expand on these or remove them and add your own.
-    Note: Values, properties defined here do no fully *exist* by this type definition alone.
-          You must also give them an implementation if you would like to use them. (ex. actually setting a `role` property in a Creeps memory)
-
-    Types added in this `global` block are in an ambient, global context. This is needed because `main.ts` is a module file (uses import or export).
-    Interfaces matching on name from @types/screeps will be merged. This is how you can extend the 'built-in' interfaces from @types/screeps.
-  */
-  // Memory extension samples
-  interface Memory {
-    uuid: number;
-    log: any;
-  }
-
-  interface CreepMemory {
-    role: string;
-    room: string;
-    working: boolean;
-  }
-
-}
-// Syntax for adding properties to `global` (ex "global.log")
-declare const global: {
-  log: any;
-}
-
-// When compiling TS to JS and bundling with rollup, the line numbers and file names in error messages change
-// This utility uses source maps to get the line numbers and file names of the original, TS source code
+// ErrorMapper 用 source map 把报错行号还原成 TypeScript 源码的位置，
+// 否则游戏控制台里显示的都是打包后 main.js 的行号。
 export const loop = ErrorMapper.wrapLoop(() => {
-  console.log(`Current game tick is ${Game.time}`);
+  cleanupCreepMemory();
 
-  // Automatically delete memory of missing creeps
+  for (const roomName in Game.rooms) {
+    const room = Game.rooms[roomName];
+    // 只处理自己占领的房间，路过的、侦查到的房间先忽略
+    if (!room.controller || !room.controller.my) continue;
+    runSpawnManager(room);
+  }
+
+  for (const name in Game.creeps) {
+    const creep = Game.creeps[name];
+    if (creep.spawning) continue;
+
+    switch (creep.memory.role) {
+      case "harvester":
+        runHarvester(creep);
+        break;
+      default:
+        creep.say("无角色");
+    }
+  }
+});
+
+/** creep 死亡后 Memory 不会自动清理，不处理会一直堆积 */
+function cleanupCreepMemory(): void {
   for (const name in Memory.creeps) {
     if (!(name in Game.creeps)) {
       delete Memory.creeps[name];
     }
   }
-});
+}

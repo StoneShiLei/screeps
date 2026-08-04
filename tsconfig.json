@@ -13,5 +13,9 @@
     "allowSyntheticDefaultImports": true,
     "allowUnreachableCode": false
   },
-  "exclude": ["node_modules"]
+  "exclude": ["node_modules"],
+  "ts-node": {
+    "//": "让单元测试也加载 src/types.d.ts 里的全局类型声明，否则 ts-node 只编译被 import 到的文件",
+    "files": true
+  }
 }
