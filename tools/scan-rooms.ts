@@ -1,19 +1,18 @@
 /**
- * 本地选房脚本：批量拉取房间地形，算出每个房间最开阔的位置有多大。
+ * 选家脚本：批量评估房间，算出每个房间 bunker 该放哪、第一个 spawn 该落在哪一格。
  *
- * 跑在 Node 里而不是游戏里，所以不消耗游戏 CPU，也不需要先占领房间——
- * Screeps 的地形和资源分布接口对任意房间都开放。
+ * 跑在 Node 里不消耗游戏 CPU，也不需要先占领房间——Screeps 的地形和资源接口对任意房间开放，
+ * 所以可以在 respawn 之前就把候选区域全部扫一遍。
  *
- * 用法（token 从 screeps.json 读，不会出现在命令行里）：
+ * 用法：
  *   $env:TS_NODE_PROJECT="tsconfig.test.json"
- *   npx ts-node -r tsconfig-paths/register tools/scan-rooms.ts W10S27 W14S31
+ *   npx ts-node -r tsconfig-paths/register tools/scan-rooms.ts W11S26 W15S31
  */
 
-import { readFileSync } from "fs";
-import { decodeTerrain, distanceTransform, findOpenSpots } from "planner/terrain";
-
-const API = "https://screeps.com/api";
-const SHARD = "shard3";
+import { FIRST_SPAWN_OFFSET } from "planner/bunkerLayout";
+import { rankAnchors } from "planner/bunkerPlanner";
+import { decodeTerrain } from "planner/terrain";
+import { fetchObjects, fetchTerrain } from "./api";
 
 type RoomKind = "普通" | "高速路" | "SK房" | "中心房";
 
@@ -22,17 +21,10 @@ interface RoomReport {
   kind: RoomKind;
   sources: number;
   mineral: string;
-  clearance: number;
-  spot: string;
-  controller: string;
+  anchorCount: number;
+  best?: { x: number; y: number; cost: number; distances: number[] };
 }
 
-function loadToken(): string {
-  const config = JSON.parse(readFileSync("screeps.json", "utf8"));
-  return config.main.token;
-}
-
-/** W12S29 -> { x: 12, y: 29 } */
 function parseRoomName(name: string): { x: number; y: number } {
   const match = /^[WE](\d+)[NS](\d+)$/.exec(name);
   if (!match) throw new Error(`房间名格式不对: ${name}`);
@@ -40,8 +32,8 @@ function parseRoomName(name: string): { x: number; y: number } {
 }
 
 /**
- * 判断房间类型。坐标是 10 的倍数的是高速路，没有 controller 不能占领；
- * 每个 10x10 扇区中间的 9 个房间是 SK 房和中心房，有 Source Keeper 看守，不适合当主基地。
+ * 坐标是 10 的倍数的是高速路，没有 controller 不能占领；
+ * 每个扇区中间 9 个房间由 Source Keeper 看守，不适合当主基地。
  */
 function classify(name: string): RoomKind {
   const { x, y } = parseRoomName(name);
@@ -55,37 +47,33 @@ function classify(name: string): RoomKind {
   return "普通";
 }
 
-async function get(path: string, token: string): Promise<any> {
-  const response = await fetch(`${API}${path}`, { headers: { "X-Token": token } });
-  if (!response.ok) throw new Error(`HTTP ${response.status}`);
-  return response.json();
-}
-
-async function inspectRoom(name: string, token: string): Promise<RoomReport> {
+async function inspectRoom(name: string): Promise<RoomReport> {
   const kind = classify(name);
-
-  const terrainResponse = await get(`/game/room-terrain?room=${name}&shard=${SHARD}&encoded=1`, token);
-  const terrain = decodeTerrain(terrainResponse.terrain[0].terrain);
-  const best = findOpenSpots(distanceTransform(terrain), 1)[0];
-
-  const objectsResponse = await get(`/game/room-objects?room=${name}&shard=${SHARD}`, token);
-  const objects: any[] = objectsResponse.objects ?? [];
+  const objects = await fetchObjects(name);
   const sources = objects.filter(o => o.type === "source");
   const controller = objects.find(o => o.type === "controller");
   const mineral = objects.find(o => o.type === "mineral");
 
-  return {
+  const report: RoomReport = {
     name,
     kind,
     sources: sources.length,
-    mineral: mineral ? mineral.mineralType : "-",
-    clearance: best ? best.clearance : 0,
-    spot: best ? `${best.x},${best.y}` : "-",
-    controller: controller ? `${controller.x},${controller.y}` : "-"
+    mineral: mineral?.mineralType ?? "-",
+    anchorCount: 0
   };
+
+  // 不能占领的房间没必要算锚点
+  if (kind !== "普通" || !controller) return report;
+
+  const terrain = decodeTerrain(await fetchTerrain(name));
+  const targets = [...sources, controller].map(o => ({ x: o.x, y: o.y }));
+  const ranked = rankAnchors(terrain, targets);
+
+  report.anchorCount = ranked.length;
+  report.best = ranked[0];
+  return report;
 }
 
-/** 生成两个角坐标之间的所有房间名 */
 function roomsInRange(from: string, to: string): string[] {
   const a = parseRoomName(from);
   const b = parseRoomName(to);
@@ -108,14 +96,13 @@ async function main(): Promise<void> {
     return;
   }
 
-  const token = loadToken();
   const names = to ? roomsInRange(from, to) : [from];
   console.log(`扫描 ${names.length} 个房间...\n`);
 
   const reports: RoomReport[] = [];
   for (const name of names) {
     try {
-      reports.push(await inspectRoom(name, token));
+      reports.push(await inspectRoom(name));
     } catch (error) {
       console.log(`  ${name} 失败: ${(error as Error).message}`);
     }
@@ -123,23 +110,28 @@ async function main(): Promise<void> {
     await new Promise(resolve => setTimeout(resolve, 120));
   }
 
-  const usable = reports.filter(r => r.kind === "普通" && r.sources === 2);
-  usable.sort((a, b) => b.clearance - a.clearance);
+  const usable = reports.filter(r => r.kind === "普通" && r.sources === 2 && r.best);
+  usable.sort((a, b) => a.best!.cost - b.best!.cost);
 
-  console.log("房间     类型    源  矿   开阔度  最开阔点  controller");
-  for (const r of reports.sort((a, b) => b.clearance - a.clearance)) {
-    const size = r.clearance * 2 - 1;
+  console.log("排名 房间     矿   锚点      总路程  到各点距离      spawn 放这里  可选锚点");
+  usable.forEach((r, i) => {
+    const best = r.best!;
+    const spawn = `${best.x + FIRST_SPAWN_OFFSET.dx},${best.y + FIRST_SPAWN_OFFSET.dy}`;
     console.log(
-      `${r.name.padEnd(8)} ${r.kind.padEnd(5)} ${r.sources}   ${r.mineral.padEnd(4)} ` +
-        `${String(r.clearance).padStart(2)} (${size}x${size})  ${r.spot.padEnd(8)} ${r.controller}`
+      `${String(i + 1).padStart(3)}  ${r.name.padEnd(8)} ${r.mineral.padEnd(4)} ` +
+        `(${String(best.x).padStart(2)},${String(best.y).padStart(2)})  ${String(best.cost).padStart(5)}   ` +
+        `${best.distances.join("/").padEnd(14)}  (${spawn.padEnd(6)})     ${String(r.anchorCount).padStart(4)}`
     );
+  });
+
+  const rejected = reports.filter(r => r.kind === "普通" && r.sources === 2 && !r.best);
+  if (rejected.length) {
+    console.log(`\n放不下 bunker 的双源房：${rejected.map(r => r.name).join(", ")}`);
   }
 
-  console.log(`\n双源普通房 ${usable.length} 个，开阔度分布：`);
-  const buckets = new Map<number, number>();
-  for (const r of usable) buckets.set(r.clearance, (buckets.get(r.clearance) ?? 0) + 1);
-  for (const [clearance, count] of [...buckets.entries()].sort((a, b) => b[0] - a[0])) {
-    console.log(`  能放下 ${clearance * 2 - 1}x${clearance * 2 - 1}: ${count} 个房间`);
+  const others = reports.filter(r => r.kind !== "普通");
+  if (others.length) {
+    console.log(`不可占领：${others.map(r => `${r.name}(${r.kind})`).join(", ")}`);
   }
 }
 

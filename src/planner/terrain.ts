@@ -76,6 +76,51 @@ export function distanceTransform(terrain: TerrainGrid): ClearanceGrid {
   return dt;
 }
 
+/** 到不了的格子用这个值表示 */
+export const UNREACHABLE = 65535;
+
+/**
+ * 从一个点出发做广度优先搜索，算出到房间内每一格要走几步。
+ *
+ * creep 可以斜着走，所以是 8 邻域。这里不区分平原和沼泽——
+ * 主干道最终都会铺路，铺完路两者速度一样，按步数算反而更接近成型后的实际情况。
+ */
+export function walkingDistanceFrom(terrain: TerrainGrid, startX: number, startY: number): Uint16Array {
+  const distance = new Uint16Array(ROOM_SIZE * ROOM_SIZE).fill(UNREACHABLE);
+  const queue = new Int32Array(ROOM_SIZE * ROOM_SIZE);
+  let head = 0;
+  let tail = 0;
+
+  const startIndex = startY * ROOM_SIZE + startX;
+  distance[startIndex] = 0;
+  queue[tail++] = startIndex;
+
+  while (head < tail) {
+    const index = queue[head++];
+    const x = index % ROOM_SIZE;
+    const y = (index - x) / ROOM_SIZE;
+    const next = distance[index] + 1;
+
+    for (let dy = -1; dy <= 1; dy++) {
+      for (let dx = -1; dx <= 1; dx++) {
+        if (dx === 0 && dy === 0) continue;
+        const nx = x + dx;
+        const ny = y + dy;
+        if (nx < 0 || ny < 0 || nx >= ROOM_SIZE || ny >= ROOM_SIZE) continue;
+
+        const neighbour = ny * ROOM_SIZE + nx;
+        if (terrain[neighbour] === TERRAIN_WALL) continue;
+        if (distance[neighbour] <= next) continue;
+
+        distance[neighbour] = next;
+        queue[tail++] = neighbour;
+      }
+    }
+  }
+
+  return distance;
+}
+
 export interface OpenSpot {
   x: number;
   y: number;
