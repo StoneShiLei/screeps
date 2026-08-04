@@ -92,3 +92,8 @@ $RECYCLE.BIN/
 room-map.txt
 scan-result.txt
 scan.txt
+
+# 本地工具脚本的输出
+room-*.txt
+*-scan.txt
+survey-*.txt
