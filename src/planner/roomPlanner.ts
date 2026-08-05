@@ -56,7 +56,9 @@ const ICON: Partial<Record<BuildableStructureConstant, string>> = {
 export function runRoomPlanner(room: Room): void {
   const flag = findPlannerFlag(room);
 
-  if (flag && !room.memory.anchor) {
+  // 已经有 spawn 时锚点是反推出来的，几乎不花 CPU，可以自动规划；
+  // 没有 spawn 就得全房间搜索最优位置，那个开销大，留给旗子手动触发。
+  if (!room.memory.anchor && (flag || room.find(FIND_MY_SPAWNS).length > 0)) {
     planRoom(room);
   }
 

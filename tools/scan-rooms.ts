@@ -77,6 +77,19 @@ function isNoviceArea(status: RoomStatus | undefined, now: number): boolean {
   return !!status?.novice && status.novice > now;
 }
 
+/** 把 E20S30 这样的扇区名展开成它包含的 100 个房间 */
+function roomsInSector(sector: string): string[] {
+  const { horizontal, x, vertical, y } = parseRoomName(sector);
+  const names: string[] = [];
+
+  for (let dx = 0; dx < 10; dx++) {
+    for (let dy = 0; dy < 10; dy++) {
+      names.push(`${horizontal}${x + dx}${vertical}${y + dy}`);
+    }
+  }
+  return names;
+}
+
 /** 已经确认过无主的房间可以直接分析，省下一次归属查询 */
 async function resolveTargets(args: string[]): Promise<string[]> {
   if (args[0] === "--list") {
@@ -85,8 +98,8 @@ async function resolveTargets(args: string[]): Promise<string[]> {
     return rooms;
   }
 
-  const [from, to] = args;
-  const target = to ? roomsInRange(from, to) : [from];
+  const target =
+    args[0] === "--sectors" ? args.slice(1).flatMap(roomsInSector) : args[1] ? roomsInRange(args[0], args[1]) : [args[0]];
 
   console.log(`查询 ${target.length} 个房间的归属...`);
   const stats = await fetchMapStatsCached(target);
