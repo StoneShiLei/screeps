@@ -56,6 +56,8 @@ export function createCreep(overrides: Record<string, any> = {}): any {
     memory: { role: "harvester", room: "W1N1", working: false },
     // 真实的 creep 一定属于某个房间，主循环在分发角色前会先问房间里有没有敌人
     room: { name: "W1N1", find: () => [] },
+    // 也一定站在某一格上：交通层每 tick 都要看谁站在了房间边缘
+    pos: { x: 25, y: 25, roomName: "W1N1" },
     say: () => 0,
     ...overrides
   };

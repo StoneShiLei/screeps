@@ -3,11 +3,25 @@
  * 加新角色时，改 quotaFor 和 SPAWN_PRIORITY 两处就够了，体型交给 bodyFor。
  */
 
+import {
+  RESERVED_MINER_WORK,
+  activeRemoteSources,
+  dismantlerQuota,
+  isReserved,
+  nextScoutTarget,
+  remoteHaulersNeeded,
+  reserverQuota,
+  unassignedBreachTarget,
+  unassignedRemoteSource,
+  unassignedReserveTarget
+} from "./remote";
 import { SUPPLY_PRIORITY, logisticsOf } from "./logistics";
 import { bodyFor } from "../utils/body";
+import { containerAt } from "../utils/structures";
 import { hostilesIn } from "../roles/defender";
 import { isVisualOn } from "../utils/settings";
 import { log } from "../utils/logger";
+import { sampleSpawnBusy } from "./spawnLoad";
 
 /** 搬运工的基础人数，再按地上堆了多少货往上加 */
 const HAULER_BASE = 2;
@@ -38,6 +52,7 @@ const UPGRADER_IDLE = 4;
 const RCL8_UPGRADERS = 1;
 const RCL8_UPGRADE_WORK = 15;
 
+
 /**
  * 每个房间期望的各角色数量。
  *
@@ -52,10 +67,21 @@ function quotaFor(room: Room, counts: Record<CreepRole, number>): Record<CreepRo
   const sites = room.find(FIND_MY_CONSTRUCTION_SITES).length;
   const sources = room.find(FIND_SOURCES).length;
 
+  const remoteSources = activeRemoteSources(room).length;
+
   return {
     defender: defenderQuota(room),
     miner: sources,
     hauler: haulerQuota(room),
+    // 侦察兵只在真有房间要探时才派，五十能量的东西不值得常备
+    scout: nextScoutTarget(room) ? 1 : 0,
+    remoteMiner: remoteSources,
+    remoteHauler: remoteSources > 0 ? remoteHaulersNeeded(room) : 0,
+    // 一个房间一个预定员，预定是按房间生效的，源再多也只要按住一次；
+    // 换人那一趟会短暂地多出一个，接班的得赶在预定断档前走完通勤路
+    reserver: reserverQuota(room),
+    // 拆迁工是一次性投资：外矿的控制器被前人的墙圈住时才有配额，砸通了就归零
+    dismantler: dismantlerQuota(room),
     // 矿工挖的能量堆在地上，没人捡就填不进 spawn，光有矿工孵化不出下一个 creep。
     // 搬运工断档时先补一个自给自足的 harvester 把链条接上。
     harvester: counts.hauler === 0 ? 1 : 0,
@@ -91,11 +117,29 @@ function defenderQuota(room: Room): number {
  * 既升不了级又白吃孵化费。
  */
 function upgraderQuota(room: Room, sites: number): number {
-  const wanted = room.controller?.level === 8 ? RCL8_UPGRADERS : sites > 0 ? UPGRADER_BUSY : UPGRADER_IDLE;
+  if (room.controller?.level === 8) return RCL8_UPGRADERS;
+
+  // 粮仓满着说明运进来的比用掉的多，这时候压着人数就是让能量烂在容器里。
+  // 外矿一通就容易出现这种局面：收入涨了，出口还是原来那两个人
+  const wanted = sites > 0 && !isGranaryFull(room) ? UPGRADER_BUSY : UPGRADER_IDLE;
 
   // 站位还没规划出来时先不封顶，那时升级工本来就是自己跑腿，不占固定位置
   const stations = room.memory.upgradeStations?.length ?? 0;
   return stations > 0 ? Math.min(wanted, stations) : wanted;
+}
+
+/**
+ * 控制器旁的容器是不是满了。
+ *
+ * 那个容器只进不出——只有升级工从里面取——所以它满着是个很干净的信号：
+ * 能量供大于求，而 storage 要 RCL4 才有，多出来的现在无处可去。
+ */
+function isGranaryFull(room: Room): boolean {
+  const spot = room.memory.upgradeSpot;
+  if (!spot) return false;
+
+  const container = containerAt(room, spot.x, spot.y);
+  return container !== undefined && container.store.getFreeCapacity(RESOURCE_ENERGY) === 0;
 }
 
 /**
@@ -126,14 +170,36 @@ function haulerQuota(room: Room): number {
  * harvester 排第二不是因为它效率高，恰恰相反——它只在搬运工断档时才有配额，
  * 那种时候需要的正是一个不依赖别人、自己挖自己送的角色来重启生产链。
  * builder 排在 upgrader 前面：有工地说明正在扩建，早点建完早点受益。
+ *
+ * 外矿那三个排在全部本土角色之后。外矿是锦上添花，家里的产线还没配齐就
+ * 往外派人，等于把本来该变成 extension 的能量拿去补一条更长更脆的运输线。
  */
-const SPAWN_PRIORITY: CreepRole[] = ["defender", "harvester", "miner", "hauler", "builder", "upgrader"];
+const SPAWN_PRIORITY: CreepRole[] = [
+  "defender",
+  "harvester",
+  "miner",
+  "hauler",
+  "builder",
+  "upgrader",
+  "scout",
+  // 预定员排在外矿的矿工和运输队前面：它一到位，那个房间所有源的产能立刻翻倍，
+  // 是整条外矿链上单位投入产出最高的一环
+  "reserver",
+  "remoteMiner",
+  "remoteHauler",
+  // 拆迁工排最后。它砸开的那段墙能让整个外矿产能翻倍，但那是几百 tick 之后的事，
+  // 而排在它前面的每一个角色都是当下就在产出——真缺人的时候先补产线
+  "dismantler"
+];
 
 export function runSpawnManager(room: Room): void {
   const spawns = room.find(FIND_MY_SPAWNS);
   if (spawns.length === 0) return;
 
   showSpawningProgress(spawns);
+  // 采样要赶在下面那个 return 前面：spawn 正忙的 tick 恰恰是最该记一笔的，
+  // 放到后面就只统计得到空闲的那些 tick，忙碌率会永远是零
+  sampleSpawnBusy(room, spawns);
 
   const idleSpawn = spawns.find(spawn => !spawn.spawning);
   if (!idleSpawn) return;
@@ -165,29 +231,63 @@ function isChainBroken(counts: Record<CreepRole, number>): boolean {
 
 function spawnCreep(spawn: StructureSpawn, role: CreepRole, isEmergency: boolean): void {
   const room = spawn.room;
+  const assignment = assignmentFor(room, role);
   const budget = isEmergency ? room.energyAvailable : room.energyCapacityAvailable;
-  const body = bodyFor(role, budget, repeatLimitFor(room, role));
+  const body = bodyFor(role, budget, repeatLimitFor(room, role, assignment));
   const name = `${role}_${Game.time}`;
 
   const result = spawn.spawnCreep(body, name, {
-    memory: { role, room: room.name, working: false }
+    memory: { role, room: room.name, working: false, ...assignment }
   });
 
   if (result === OK) {
-    log.info("孵化", `${room.name} 孵化 ${name}，体型 ${body.length} 部件${isEmergency ? "（应急）" : ""}`);
+    const where = assignment.targetRoom ? ` 派往 ${assignment.targetRoom}` : "";
+    log.info("孵化", `${room.name} 孵化 ${name}，体型 ${body.length} 部件${where}${isEmergency ? "（应急）" : ""}`);
   }
 }
 
 /**
- * 房间等级会改变某些角色的最优规模，体型模板不该自己去读游戏状态，所以在这里换算。
+ * 外派角色在孵化那一刻就把去处定下来。
+ *
+ * 不留给它出生后自己挑，是因为体型要按目标房间来定：已预定的房间源容量翻倍，
+ * 矿工得多带 WORK 才追得上产量。而体型在 spawnCreep 调用的瞬间就固定了，
+ * 等它出生后再认领已经来不及改。
+ */
+function assignmentFor(room: Room, role: CreepRole): Partial<CreepMemory> {
+  if (role === "reserver") {
+    const target = unassignedReserveTarget(room);
+    return target ? { targetRoom: target } : {};
+  }
+
+  if (role === "remoteMiner") {
+    const source = unassignedRemoteSource(room);
+    return source ? { targetRoom: source.roomName, sourceId: source.sourceId as Id<Source> } : {};
+  }
+
+  if (role === "dismantler") {
+    const target = unassignedBreachTarget(room);
+    return target ? { targetRoom: target } : {};
+  }
+
+  return {};
+}
+
+/**
+ * 房间状态会改变某些角色的最优规模，体型模板不该自己去读游戏状态，所以在这里换算。
  *
  * 满级房间的能量多到用不完，升级工可以一路堆到把控制器的每 tick 上限吃满；
  * 低等级时预算本来就堆不到那么高，用模板默认值即可。
  */
-function repeatLimitFor(room: Room, role: CreepRole): number | undefined {
-  if (role !== "upgrader" || room.controller?.level !== 8) return undefined;
+function repeatLimitFor(room: Room, role: CreepRole, assignment: Partial<CreepMemory>): number | undefined {
+  if (role === "upgrader" && room.controller?.level === 8) return RCL8_UPGRADE_WORK;
 
-  return RCL8_UPGRADE_WORK;
+  // 预定过的外矿源是 3000 容量、平均 10 能量/tick，3 个 WORK 每 tick 只挖 6 点，
+  // 追不上再生速度，源会一直是满的——白放着一半产能不要
+  if (role === "remoteMiner" && assignment.targetRoom && isReserved(assignment.targetRoom)) {
+    return RESERVED_MINER_WORK;
+  }
+
+  return undefined;
 }
 
 function countByRole(room: Room): Record<CreepRole, number> {
@@ -197,7 +297,12 @@ function countByRole(room: Room): Record<CreepRole, number> {
     builder: 0,
     miner: 0,
     hauler: 0,
-    defender: 0
+    defender: 0,
+    scout: 0,
+    remoteMiner: 0,
+    remoteHauler: 0,
+    reserver: 0,
+    dismantler: 0
   };
 
   for (const creep of Object.values(Game.creeps)) {

@@ -62,7 +62,36 @@ const TEMPLATES: Record<CreepRole, BodyTemplate> = {
   harvester: { pattern: ["work", "carry", "move"], fixed: [], maxRepeat: 3 },
   // defender 的零头买 TOUGH：10 能量一个、抵 100 点伤害，是全表里最便宜的血。
   // 它挡不住多少刀，但足够撑到塔或者同伴补上——而这些零头本来是要浪费掉的。
-  defender: { pattern: ["attack", "move"], fixed: [], maxRepeat: 10, filler: "tough" }
+  defender: { pattern: ["attack", "move"], fixed: [], maxRepeat: 10, filler: "tough" },
+
+  // scout 只要视野，不干活也不挨打。一个 MOVE 五十能量，死了再造一个就是
+  scout: { pattern: ["move"], fixed: [], maxRepeat: 1 },
+
+  // 外矿的源是 1500 容量、300 tick 再生，平均 5 能量/tick，3 个 WORK 每 tick
+  // 挖 6 点就已经超过再生速度。再多带只会更早把源挖空然后干站着，白付孵化费。
+  // MOVE 配到一比一：它要跨房间通勤几十格，路上每一 tick 都是纯亏。
+  remoteMiner: { pattern: ["work", "move"], fixed: [], maxRepeat: 3 },
+
+  // 长途运输队，CARRY 和 MOVE 一比一保证平地满载也能全速。外矿路线前期没有路，
+  // 二比一那种省钱配法会让它在平地上就走两 tick 一格，往返多花几十 tick
+  remoteHauler: { pattern: ["carry", "move"], fixed: [], maxRepeat: 12 },
+
+  // 预定员只要一个 CLAIM。
+  //
+  // 预定的剩余时长每 tick 自减一，一个 CLAIM 每 tick 补一，净增为零——但那正好够：
+  // 源的容量是在再生的那一刻按"这个房间此刻有没有被预定"决定的，只要人在岗，
+  // 房间就一直算被预定，容量就是 3000。攒余量只对换人的空窗有意义。
+  //
+  // 两个 CLAIM 能攒余量，摊到每 tick 的成本也几乎一样（1250 管 2×(600-路程) tick，
+  // 对 650 管 600-路程），但它要 1300 能量、得等 RCL4；一个 CLAIM 只要 650，
+  // RCL3 造出七个 extension 就够，能早几千 tick 让外矿产能翻倍。空窗靠提前孵化
+  // 接班的人来盖，那比多背一个 CLAIM 便宜。
+  reserver: { pattern: ["claim", "move"], fixed: [], maxRepeat: 1 },
+
+  // 两个 WORK 配一个 MOVE：平地上每步的疲劳等于非 MOVE 部件数，一个 MOVE 每 tick
+  // 消两点，这个比例刚好让它满载走平地也是一格一 tick。零头继续买 MOVE——它去的
+  // 是没有路的外矿，早到几十 tick 就是早几十 tick 开始砸墙。
+  dismantler: { pattern: ["work", "work", "move"], fixed: [], maxRepeat: 16, filler: "move" }
 };
 
 /** 输出顺序：受伤时身体从头开始掉，把 MOVE 放最后，残血了也还能挪回家 */
@@ -86,17 +115,21 @@ export function bodyFor(role: CreepRole, budget: number, repeatLimit?: number): 
   const bonus = template.bonus && budget >= template.bonus.minBudget ? template.bonus.parts : [];
   const base = [...template.fixed, ...bonus];
 
+  const limit = repeatLimit ?? template.maxRepeat;
   const patternCost = costOf(template.pattern);
   const affordable = Math.floor((budget - costOf(base)) / patternCost);
   const withinPartLimit = Math.floor((MAX_PARTS - base.length) / template.pattern.length);
-  const repeat = Math.max(1, Math.min(repeatLimit ?? template.maxRepeat, withinPartLimit, affordable));
+  const repeat = Math.max(1, Math.min(limit, withinPartLimit, affordable));
 
   const body: BodyPartConstant[] = [...base];
   for (let i = 0; i < repeat; i++) {
     body.push(...template.pattern);
   }
 
-  if (affordable <= repeat) spendLeftover(body, budget, template.filler ?? "carry");
+  // 只有"钱不够再凑一组"时才花零头。顶到角色上限的一律不加：预算刚好买满
+  // 上限那一档时零头看着像白扔，可给预定员塞三个 MOVE、给矿工塞第六个 WORK
+  // 都是纯亏——多出来的部件每 tick 都在收孵化费，却一点产出都不多。
+  if (repeat < limit) spendLeftover(body, budget, template.filler ?? "carry");
 
   return body.sort((a, b) => PART_ORDER.indexOf(a) - PART_ORDER.indexOf(b));
 }
@@ -128,6 +161,16 @@ function spendLeftover(body: BodyPartConstant[], budget: number, filler: BodyPar
     body.push(part);
     leftover -= PART_COST[part];
   }
+}
+
+/**
+ * 模板允许的最大重复组数。
+ *
+ * 配额计算要按这个封顶：高等级房间的预算能买下几十组，但模板上限拦在那里，
+ * 照预算估出来的运力是造不出来的，人数就会算少。
+ */
+export function maxRepeatFor(role: CreepRole): number {
+  return TEMPLATES[role].maxRepeat;
 }
 
 /** 孵化这个体型要花多少能量 */

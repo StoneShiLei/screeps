@@ -1,13 +1,20 @@
+import { cleanupCreepMemory, cleanupRoomMemory } from "utils/memory";
 import { evade, reportThreat, runDefender } from "roles/defender";
+import { runRemoteManager, watchRemote } from "managers/remote";
 import { ErrorMapper } from "utils/ErrorMapper";
 import { announce } from "utils/logger";
 import { drawRoomPanel } from "managers/panel";
 import { installCommands } from "cli/commands";
 import { runBuilder } from "roles/builder";
+import { runDismantler } from "roles/dismantler";
 import { runHarvester } from "roles/harvester";
 import { runHauler } from "roles/hauler";
 import { runMiner } from "roles/miner";
+import { runRemoteHauler } from "roles/remoteHauler";
+import { runRemoteMiner } from "roles/remoteMiner";
+import { runReserver } from "roles/reserver";
 import { runRoomPlanner } from "planner/roomPlanner";
+import { runScout } from "roles/scout";
 import { runSpawnManager } from "managers/spawnManager";
 import { runTowers } from "managers/tower";
 import { runTraffic } from "movement/traffic";
@@ -25,10 +32,16 @@ export const loop = ErrorMapper.wrapLoop(() => {
 
   for (const roomName in Game.rooms) {
     const room = Game.rooms[roomName];
-    // 只处理自己占领的房间，路过的、侦查到的房间先忽略
-    if (!room.controller || !room.controller.my) continue;
+    if (!room.controller || !room.controller.my) {
+      // 有视野的外矿房间只做观察：敌情和归属变化要趁有人在场时记下来
+      watchRemote(room);
+      continue;
+    }
+
     reportThreat(room);
     runTowers(room);
+    // 名单要在孵化之前定好，配额是照名单算的
+    runRemoteManager(room);
     runSpawnManager(room);
     runRoomPlanner(room);
   }
@@ -61,6 +74,21 @@ export const loop = ErrorMapper.wrapLoop(() => {
       case "builder":
         runBuilder(creep);
         break;
+      case "scout":
+        runScout(creep);
+        break;
+      case "remoteMiner":
+        runRemoteMiner(creep);
+        break;
+      case "remoteHauler":
+        runRemoteHauler(creep);
+        break;
+      case "reserver":
+        runReserver(creep);
+        break;
+      case "dismantler":
+        runDismantler(creep);
+        break;
       default:
         announce(creep, "无角色");
     }
@@ -78,26 +106,3 @@ export const loop = ErrorMapper.wrapLoop(() => {
     drawRoomPanel(room);
   }
 });
-
-/** creep 死亡后 Memory 不会自动清理，不处理会一直堆积 */
-function cleanupCreepMemory(): void {
-  for (const name in Memory.creeps) {
-    if (!(name in Game.creeps)) {
-      delete Memory.creeps[name];
-    }
-  }
-}
-
-/**
- * 丢掉已经不属于自己的房间的记录，比如 respawn 之后的旧家。
- *
- * 自己占领的房间一定有视野，所以在 Game.rooms 里找不到就是真的没了。
- * 以后要记录外派采集的房间时，这里得改成白名单判断。
- */
-function cleanupRoomMemory(): void {
-  for (const name in Memory.rooms) {
-    if (!Game.rooms[name]?.controller?.my) {
-      delete Memory.rooms[name];
-    }
-  }
-}

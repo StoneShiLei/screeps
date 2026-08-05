@@ -1,5 +1,5 @@
 import { assert } from "chai";
-import { holdPosition, requestMove, runTraffic } from "../../src/movement/traffic";
+import { holdPosition, noteDeparture, requestMove, runTraffic } from "../../src/movement/traffic";
 
 /** 方向常量 1..8，从正上方起顺时针一圈 */
 const DIRECTIONS: Record<string, number> = {
@@ -186,6 +186,26 @@ describe("交通结算", () => {
     runTraffic();
 
     assert.isUndefined(idler.moved);
+  });
+
+  it("停在房间边缘的闲人会被请进来一格", () => {
+    const loiterer = creepAt("loiterer", 0, 25);
+
+    runTraffic();
+
+    // 引擎会把 tick 结束时还站在边缘的 creep 送进邻房，那边同样是边缘格，
+    // 下一 tick 又送回来，于是它会在两个房间之间没完没了地弹
+    const inward = [DIRECTIONS["1,-1"], RIGHT_WARD, DIRECTIONS["1,1"]];
+    assert.include(inward, loiterer.moved, "得往房间里走一格才站得住");
+  });
+
+  it("正要跨出房间的不会被拉回来", () => {
+    const leaver = creepAt("leaver", 0, 25);
+
+    noteDeparture(leaver as unknown as Creep);
+    runTraffic();
+
+    assert.isUndefined(leaver.moved, "跨房那一步是它自己发的 move，兜底再发一次正好把出门取消掉");
   });
 
   it("上一 tick 的意图不会残留到下一 tick", () => {

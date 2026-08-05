@@ -6,7 +6,14 @@
  * 造兵的时候优先喂 spawn，被打的时候优先喂 tower，不用改一行代码。
  */
 
-import { LogisticsEntry, SUPPLY_PRIORITY, chooseEntry, claimSupply, isDropped, logisticsOf } from "../managers/logistics";
+import {
+  LogisticsEntry,
+  SUPPLY_PRIORITY,
+  claimDemand,
+  claimSupply,
+  isDropped,
+  logisticsOf
+} from "../managers/logistics";
 import { announce } from "../utils/logger";
 import { travelTo } from "../movement/move";
 
@@ -82,25 +89,10 @@ function pickUp(creep: Creep): void {
   }
 }
 
-/**
- * 先看认领的目标还算不算数，不算了再挑新的。
- *
- * 顺序不能反：供需表里已经扣掉了自己认领的那份，直接去挑新目标的话，
- * 自己刚认领的目标会因为"已经不缺了"而落选，于是每 tick 换一个目标来回跑。
- */
+/** 排除刚取货的地方，否则从 storage 取了又原样送回去，来回空转 */
 function resolveDelivery(creep: Creep): AnyStoreStructure | null {
-  const remembered = creep.memory.deliverTo
-    ? Game.getObjectById(creep.memory.deliverTo as Id<AnyStoreStructure>)
-    : null;
-  if (remembered && remembered.store.getFreeCapacity(RESOURCE_ENERGY)) return remembered;
-
-  // 排除刚取货的地方，否则从 storage 取了又原样送回去，来回空转
   const candidates = logisticsOf(creep.room).demands.filter(entry => entry.id !== creep.memory.withdrawFrom);
-  const chosen = chooseEntry(creep.pos.x, creep.pos.y, candidates);
-  if (!chosen) return null;
-
-  creep.memory.deliverTo = chosen.id;
-  return Game.getObjectById(chosen.id as Id<AnyStoreStructure>);
+  return claimDemand(creep, candidates);
 }
 
 /**

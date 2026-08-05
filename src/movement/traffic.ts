@@ -17,11 +17,17 @@ import { costMatrixFor } from "./costMatrix";
 const EDGE = 0;
 const FAR_EDGE = 49;
 
+/** 房间中心，判断哪个方向算"往里" */
+const CENTER = 25;
+
 /** 本 tick 谁想去哪，键是 creep 名字 */
 const intents = new Map<string, RoomPosition>();
 
 /** 声明钉死的 creep，任何人都推不动它们 */
 const anchored = new Set<string>();
+
+/** 本 tick 已经自己发过 move 的 creep，别再替它安排一次把原意图覆盖掉 */
+const departing = new Set<string>();
 
 let currentTick = -1;
 
@@ -31,12 +37,24 @@ function ensureFreshTick(): void {
   currentTick = Game.time;
   intents.clear();
   anchored.clear();
+  departing.clear();
 }
 
 /** 登记移动意图。目标必须与当前位置相邻，寻路那一层负责保证这点 */
 export function requestMove(creep: Creep, target: RoomPosition): void {
   ensureFreshTick();
   intents.set(creep.name, target);
+}
+
+/**
+ * 声明这一 tick 已经绕过交通层自己走了。
+ *
+ * 只有跨房间那一步会这样：出口对面归另一个房间管，本房间的交通层看不见那边，
+ * 协调不了。但边缘兜底得知道这件事，否则会把正要出门的人拉回房间里。
+ */
+export function noteDeparture(creep: Creep): void {
+  ensureFreshTick();
+  departing.add(creep.name);
 }
 
 /**
@@ -58,6 +76,7 @@ export function holdPosition(creep: Creep): void {
  */
 export function runTraffic(): void {
   ensureFreshTick();
+  stepOffEdges();
   if (intents.size === 0) return;
 
   const context: Context = {
@@ -178,6 +197,53 @@ function walkableNeighbors(creep: Creep): RoomPosition[] {
   }
 
   return result;
+}
+
+/**
+ * 把停在房间边缘的 creep 请进来一格。
+ *
+ * 引擎会把 tick 结束时还站在边缘格上的 creep 送到邻房的对侧，而那一格同样是
+ * 边缘，下一 tick 又被送回来。于是没活干的 creep 会在两个房间之间无休止地弹，
+ * 看着像在巡逻，实际上每一 tick 都白跑一遍角色逻辑，还会连带把"我在哪个房间"
+ * 这类判断搅乱——它每 tick 都在换房间。
+ *
+ * 放在交通层是因为这里是全部意图汇总之后、真正发 move 之前的唯一位置：
+ * 谁这一 tick 没打算动，只有到这时候才数得清。
+ */
+function stepOffEdges(): void {
+  for (const creep of Object.values(Game.creeps)) {
+    if (!onEdge(creep.pos)) continue;
+    // 已经有打算的不管：想动的自己会动，正要出门的更不该被拉回来
+    if (intents.has(creep.name) || departing.has(creep.name)) continue;
+
+    const inward = inwardStep(creep);
+    if (inward) intents.set(creep.name, inward);
+  }
+}
+
+function onEdge(pos: RoomPosition): boolean {
+  return pos.x <= EDGE || pos.y <= EDGE || pos.x >= FAR_EDGE || pos.y >= FAR_EDGE;
+}
+
+/**
+ * 边缘旁边最靠里的那一格。
+ *
+ * walkableNeighbors 本身就不返回边缘格，所以随便挑一个都算离开了边缘；挑最
+ * 靠中心的那个只是顺手多走出一步，免得在拐角处又贴着另一条边。
+ */
+function inwardStep(creep: Creep): RoomPosition | undefined {
+  let best: RoomPosition | undefined;
+  let bestDistance = Infinity;
+
+  for (const pos of walkableNeighbors(creep)) {
+    const distance = Math.max(Math.abs(pos.x - CENTER), Math.abs(pos.y - CENTER));
+    if (distance < bestDistance) {
+      best = pos;
+      bestDistance = distance;
+    }
+  }
+
+  return best;
 }
 
 function keyOf(pos: RoomPosition): string {

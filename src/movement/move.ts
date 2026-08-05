@@ -14,10 +14,10 @@
  * 这样面对面的两个 creep 能直接换位，不用谁绕开谁。
  */
 
+import { noteDeparture, requestMove } from "./traffic";
 import { announce } from "../utils/logger";
 import { costMatrixFor } from "./costMatrix";
 import { isVisualOn } from "../utils/settings";
-import { requestMove } from "./traffic";
 
 /** 方向常量 1..8 对应的坐标偏移，下标 0 空着占位 */
 const OFFSETS: readonly (readonly [number, number])[] = [
@@ -40,8 +40,17 @@ const OFFSETS: readonly (readonly [number, number])[] = [
  */
 const STUCK_LIMIT = 3;
 
-/** 寻路的算力上限，超了就用当前找到的次优解 */
+/** 房内寻路的算力上限，超了就用当前找到的次优解 */
 const MAX_OPS = 2000;
+
+/**
+ * 跨房间寻路的算力上限。
+ *
+ * 外矿单程六七十格，跨着两三个房间搜，2000 ops 经常不够用；不够时 PathFinder
+ * 返回的是半成品，creep 会朝着大致方向撞墙。这条路每 tick 都在走，一次算贵点
+ * 换一条真能走通的路是值的。
+ */
+const MAX_OPS_INTERROOM = 8000;
 
 export interface TravelOptions {
   /** 离目标多近算到达，默认贴身。建造和升级这类远程操作可以放大 */
@@ -66,14 +75,25 @@ export function travelTo(creep: Creep, target: RoomPosition | _HasRoomPosition, 
     return;
   }
 
-  const next = stepFrom(creep.pos, Number(state.path[0]));
-  if (!next) {
+  const direction = toDirection(state.path[0]);
+  if (!direction) {
     delete creep.memory.travel;
     return;
   }
 
-  state.last = keyOf(creep.pos);
-  requestMove(creep, next);
+  const next = stepFrom(creep.pos, direction);
+  if (next) {
+    state.last = keyOf(creep.pos);
+    requestMove(creep, next);
+  } else {
+    // 下一格落在房间外面，说明这一步是跨出去。出口对面归另一个房间管，
+    // 本房间的交通层看不到那边的 creep，也就无从协调，直接走；但要报备一声，
+    // 否则边缘兜底会把正要出门的人当成闲人拉回来。
+    // 过去之后路径缓存作废，下一 tick 在新房间从头寻路。
+    creep.move(direction);
+    noteDeparture(creep);
+    delete creep.memory.travel;
+  }
 
   // 颜色仍由调用方决定（区分取货/送货），开关只决定画不画
   if (options.visualizePathStyle && isVisualOn("movement")) {
@@ -119,13 +139,14 @@ function refreshState(creep: Creep, destination: RoomPosition, range: number): T
  * 它们迟早会走开；但已经卡了几 tick 就说明对面也动不了，这时候绕开才是对的。
  */
 function findPath(creep: Creep, destination: RoomPosition, range: number, avoidCreeps: boolean): string | undefined {
+  const crossing = destination.roomName !== creep.pos.roomName;
   const result = PathFinder.search(
     creep.pos,
     { pos: destination, range },
     {
       plainCost: 2,
       swampCost: 10,
-      maxOps: MAX_OPS,
+      maxOps: crossing ? MAX_OPS_INTERROOM : MAX_OPS,
       roomCallback: roomName => {
         const room = Game.rooms[roomName];
         if (!room) return false;
@@ -145,20 +166,26 @@ function findPath(creep: Creep, destination: RoomPosition, range: number, avoidC
   let serialized = "";
   let previous = creep.pos;
   for (const step of result.path) {
-    // 跨房间的那一段留给下次重算，方向串只描述当前房间内的路
-    if (step.roomName !== previous.roomName) break;
-
     serialized += previous.getDirectionTo(step);
+
+    // 跨出房间的那一步要编进来，否则 creep 走到出口格就没有下一步可走了。
+    // 但只编这一步：邻房的地形要有视野才看得清，隔着墙算出来的路多半是错的，
+    // 等真站过去了再重新算。
+    if (step.roomName !== previous.roomName) break;
     previous = step;
   }
 
   return serialized.length > 0 ? serialized : undefined;
 }
 
-function stepFrom(pos: RoomPosition, direction: number): RoomPosition | undefined {
-  const offset = OFFSETS[direction];
-  if (!offset) return undefined;
+function toDirection(character: string): DirectionConstant | undefined {
+  const value = Number(character);
+  return value >= 1 && value <= 8 ? (value as DirectionConstant) : undefined;
+}
 
+/** 算出这一步落在哪；返回 undefined 表示走出了房间，得交给调用方按跨房间处理 */
+function stepFrom(pos: RoomPosition, direction: DirectionConstant): RoomPosition | undefined {
+  const offset = OFFSETS[direction];
   const x = pos.x + offset[0];
   const y = pos.y + offset[1];
   if (x < 0 || y < 0 || x > 49 || y > 49) return undefined;

@@ -5,7 +5,9 @@
  * 仍挂在 panel 开关上，关掉就彻底不画。
  */
 
+import { CROWDED, spawnLoadOf } from "./spawnLoad";
 import { SUPPLY_PRIORITY, logisticsOf } from "./logistics";
+import { isRemotePaused, reserveLeft } from "./remote";
 import { decodeCells } from "../planner/roads";
 import { isVisualOn } from "../utils/settings";
 import { roomPopulation } from "./spawnManager";
@@ -129,12 +131,16 @@ function buildLines(room: Room, controller: StructureController): PanelLine[] {
   lines.push({ text: pop || "无人", color: "#cccccc" });
 
   lines.push(logisticsLine(room));
+  lines.push(spawnLine(room));
 
   const sites = room.find(FIND_MY_CONSTRUCTION_SITES).length;
   lines.push({ text: `工地 ${sites}`, color: sites > 0 ? "#ffff88" : "#888888" });
 
   const roads = roadLine(room);
   if (roads) lines.push(roads);
+
+  const remotes = remoteLine(room);
+  if (remotes) lines.push(remotes);
 
   const cpu = Game.cpu.getUsed();
   const bucket = Game.cpu.bucket;
@@ -167,6 +173,68 @@ function logisticsLine(room: Room): PanelLine {
     text: `待运 ${waiting} 缺口 ${missing}`,
     color: waiting > BACKLOG_WARN ? "#ffaa44" : "#aaccaa"
   };
+}
+
+/**
+ * 孵化一行：spawn 忙成什么样，编制吃掉了多少预算。
+ *
+ * 一个 spawn 一轮寿命只造得出 500 个部件，这是常驻人口的硬上限，跟能量多少无关。
+ * 撞上之后每多派一个人，就有别处的人死了补不上，而账面上一点征兆都没有——能量
+ * 看着够用，人却总是差几个。所以这两个数得摆在明面上。
+ *
+ * 忙碌率明显低于编制比例，说明 spawn 想造却造不出来，那是能量没跟上；忙碌率贴着
+ * 满而编制还有余量，说明有人死得太勤，多半是在外面被打了。
+ */
+function spawnLine(room: Room): PanelLine {
+  const load = spawnLoadOf(room);
+  const ratio = load.capacity > 0 ? load.parts / load.capacity : 0;
+
+  return {
+    text: `孵化 ${Math.round(load.busy * 100)}% 编制 ${Math.round(load.parts)}/${Math.round(load.capacity)}`,
+    color: ratio > CROWDED ? "#ffaa44" : "#aaccaa"
+  };
+}
+
+/**
+ * 外矿一行：哪几个房间在采，冷却中的标出来。
+ *
+ * 外矿房间平时没视野，出了问题（被人占了、进了入侵者）在地图上一点征兆都没有，
+ * 只能靠这行看出来"名单里有三个，实际在产的只有一个"。
+ */
+function remoteLine(room: Room): PanelLine | undefined {
+  const remotes = room.memory.remotes;
+  if (!remotes || remotes.length === 0) return undefined;
+
+  const parts: string[] = [];
+  let idle = 0;
+
+  for (const name of remotes) {
+    const paused = isRemotePaused(name);
+    if (paused) idle++;
+
+    parts.push(`${name}${remoteMark(name, paused)}`);
+  }
+
+  return {
+    text: `外矿 ${parts.join(" ")}`,
+    color: idle > 0 ? "#ffaa44" : "#aaccaa"
+  };
+}
+
+/**
+ * 外矿房间名后面那个小标记。
+ *
+ * 停是遇袭冷却；墙是控制器被前人的墙圈住了，还剩多少血量要砸；订是预定剩余，
+ * 这个数在掉就说明预定员没接上班，源正要缩回 1500 容量。
+ */
+function remoteMark(roomName: string, paused: boolean): string {
+  if (paused) return "(停)";
+
+  const breach = Memory.rooms[roomName]?.breach;
+  if (breach) return breach.wall ? `(墙${Math.ceil(breach.hits / 1000)}k)` : "(封死)";
+
+  const left = reserveLeft(roomName);
+  return left > 0 ? `(订${Math.round(left / 100)})` : "";
 }
 
 /**
@@ -268,7 +336,12 @@ function shortRole(role: CreepRole): string {
     hauler: "运",
     builder: "建",
     upgrader: "升",
-    defender: "卫"
+    defender: "卫",
+    scout: "探",
+    remoteMiner: "外矿",
+    remoteHauler: "外运",
+    reserver: "订",
+    dismantler: "拆"
   };
   return names[role];
 }

@@ -93,6 +93,29 @@ export function claimSupply(creep: Creep, supplies: LogisticsEntry[]): Logistics
   return Game.getObjectById(chosen.id as Id<LogisticsTarget>);
 }
 
+/**
+ * 从需求表里挑一个目标去送货，并登记认领。
+ *
+ * 和 claimSupply 对称。先看认领过的那个还算不算数，不算了再挑新的——顺序不能反：
+ * 需求表里已经扣掉了自己认领的那份，直接挑新目标的话，自己刚认领的目标会因为
+ * "已经不缺了"而落选，于是每 tick 换一个目标来回跑。
+ */
+export function claimDemand(creep: Creep, demands: LogisticsEntry[]): AnyStoreStructure | null {
+  const remembered = creep.memory.deliverTo
+    ? Game.getObjectById(creep.memory.deliverTo as Id<AnyStoreStructure>)
+    : null;
+  if (remembered && remembered.store.getFreeCapacity(RESOURCE_ENERGY)) return remembered;
+
+  const chosen = chooseEntry(creep.pos.x, creep.pos.y, demands);
+  if (!chosen) {
+    delete creep.memory.deliverTo;
+    return null;
+  }
+
+  creep.memory.deliverTo = chosen.id;
+  return Game.getObjectById(chosen.id as Id<AnyStoreStructure>);
+}
+
 /** 某个 creep 对某个目标的认领，用来扣减在途量 */
 export interface Reservation {
   targetId: string;
@@ -212,7 +235,7 @@ function collectReservations(room: Room): { pickups: Reservation[]; deliveries: 
   const deliveries: Reservation[] = [];
 
   for (const creep of Object.values(Game.creeps)) {
-    if (creep.memory.room !== room.name) continue;
+    if (!concerns(creep, room.name)) continue;
 
     if (creep.memory.deliverTo) {
       deliveries.push({ targetId: creep.memory.deliverTo, amount: creep.store[RESOURCE_ENERGY] });
@@ -223,6 +246,17 @@ function collectReservations(room: Room): { pickups: Reservation[]; deliveries: 
   }
 
   return { pickups, deliveries };
+}
+
+/**
+ * 这个 creep 的认领算不算在这个房间头上。
+ *
+ * 除了归属本房间的，还要算上正站在这里的和正赶过来的外派人员：它们认领的
+ * 就是这个房间里的货，漏掉的话几个外矿运输队会一起扑向同一堆能量，
+ * 后到的那个白跑一趟几十格。
+ */
+function concerns(creep: Creep, roomName: string): boolean {
+  return creep.memory.room === roomName || creep.room.name === roomName || creep.memory.targetRoom === roomName;
 }
 
 function collectDemands(room: Room): LogisticsEntry[] {

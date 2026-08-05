@@ -5,7 +5,18 @@
  * 里的同名 interface 合并，成为全局类型。往 Memory 里存新字段时，先在这里声明。
  */
 
-type CreepRole = "harvester" | "upgrader" | "builder" | "miner" | "hauler" | "defender";
+type CreepRole =
+  | "harvester"
+  | "upgrader"
+  | "builder"
+  | "miner"
+  | "hauler"
+  | "defender"
+  | "scout"
+  | "remoteMiner"
+  | "remoteHauler"
+  | "reserver"
+  | "dismantler";
 
 interface CreepMemory {
   role: CreepRole;
@@ -29,6 +40,13 @@ interface CreepMemory {
   idleTicks?: number;
   /** announce 上次喊过的内容，一样就不重复喊 */
   lastSay?: string;
+  /**
+   * 外派 creep 的目标房间。
+   *
+   * 和 room 是两回事：room 是它归哪个基地管（配额、物流都按这个算），
+   * targetRoom 是它这趟要去哪个外矿。
+   */
+  targetRoom?: string;
 }
 
 /**
@@ -98,6 +116,68 @@ interface RoomMemory {
   lastBuildCheck?: number;
   /** 上次播报时房间里的敌人数量，数量没变就不重复刷屏 */
   threat?: number;
+  /**
+   * 本房间正在外派采集的房间名。
+   *
+   * 只有基地房间有这个字段，外矿房间那边记的是 home，两边互指方便双向查。
+   */
+  remotes?: string[];
+  /** 外矿房间归哪个基地管。这个字段也是 Memory 清理时的白名单标记 */
+  home?: string;
+  /**
+   * 侦察到的能量源位置，键是 source id。
+   *
+   * 外矿房间平时没有视野，find(FIND_SOURCES) 是空的，派矿工出门前得靠这份
+   * 记录才知道该去哪一格。地形和 source 位置都是永久不变的，存一次就够。
+   */
+  sources?: Record<string, { x: number; y: number }>;
+  /** 上次侦察完成的 tick，没有这个字段就是还没侦察过 */
+  scouted?: number;
+  /**
+   * 这个房间不能采，以及为什么。
+   *
+   * owned/reserved 是被别人占了，keeper 是有 Source Keeper 守着，
+   * core 是驻了 invader core，none 是压根没有能量源。
+   */
+  unusable?: "owned" | "reserved" | "keeper" | "core" | "none";
+  /** 上次在这里撞见敌人的 tick，用来给外派人员放一段冷却 */
+  raided?: number;
+  /**
+   * 控制器被前人的墙圈住了，要拆哪一段才够得着。
+   *
+   * 有这个字段就说明预定员派过去也只能站在墙外，所以配额那边会跳过这个房间，
+   * 改派拆迁工。墙拆完了这个字段会被清掉，预定随之恢复。
+   *
+   * hits 记的是整条路上要砸掉的总血量，不只是第一段——用来判断值不值得动手。
+   */
+  breach?: {
+    /**
+     * 挡在最省那条路上的第一段墙，先拆它。
+     *
+     * 没有这个字段说明连拆都拆不进去——目标那片地方被天然岩石隔开，
+     * 只能从别的房间绕，而带 CLAIM 的 creep 活不到走完那段路。
+     */
+    wall?: { x: number; y: number };
+    /** 整条路上要砸掉的血量总和，不只是第一段 */
+    hits: number;
+    /** 要拆几段 */
+    walls: number;
+  };
+  /**
+   * 自己的预定什么时候到期，绝对 tick。
+   *
+   * 存到期时刻而不是剩余时长，是因为这个字段在没视野的几百 tick 里也要能读：
+   * 预定期间源的容量从 1500 涨到 3000，矿工体型和运力配额都要照这个改，
+   * 而算配额是在基地跑的，那边看不见外矿的 controller。
+   */
+  reserveEnds?: number;
+  /**
+   * 平滑后的孵化忙碌率，0 到 1。
+   *
+   * 只存平滑值不存采样历史：孵化忙不忙看的是几百 tick 的趋势，逐 tick 的
+   * 0/1 抖动没有意义，而 Memory 是按序列化长度收费的。
+   */
+  spawnBusy?: number;
   /**
    * 升级进度采样，用来估距下一级还要多久。
    *
