@@ -5,8 +5,8 @@
  * 所以 Memory 占用极小，也不用担心存量随房间数增长。
  */
 
-import { rankAnchors, structuresForLevel } from "./bunkerPlanner";
-import { BUNKER_STRUCTURES } from "./bunkerLayout";
+import { BUNKER_STRUCTURES, FIRST_SPAWN_OFFSET } from "./bunkerLayout";
+import { canPlaceBunker, rankAnchors, structuresForLevel } from "./bunkerPlanner";
 import { terrainOfRoom } from "./terrain";
 
 /** 在房间里放一个名字以此开头的旗子，就会触发规划并显示布局 */
@@ -84,6 +84,24 @@ export function planRoom(room: Room): boolean {
   if (!controller) {
     console.log(`[规划] ${room.name} 没有控制器，无法规划`);
     return false;
+  }
+
+  // 房间里已经有 spawn 的话，锚点只能由它反推。
+  // 重新算最优位置的话，算出来的锚点多半和现有 spawn 对不上，整个布局就歪了。
+  const spawn = room.find(FIND_MY_SPAWNS)[0];
+  if (spawn) {
+    const anchor = {
+      x: spawn.pos.x - FIRST_SPAWN_OFFSET.dx,
+      y: spawn.pos.y - FIRST_SPAWN_OFFSET.dy
+    };
+    room.memory.anchor = anchor;
+
+    const fits = canPlaceBunker(terrainOfRoom(room.name), anchor.x, anchor.y);
+    console.log(
+      `[规划] ${room.name} 锚点由已有 spawn 反推为 (${anchor.x},${anchor.y})` +
+        (fits ? "" : "，注意：这个位置地形放不下完整 bunker，部分建筑会被墙挡住")
+    );
+    return true;
   }
 
   const started = Game.cpu.getUsed();
