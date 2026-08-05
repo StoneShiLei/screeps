@@ -5,7 +5,7 @@
  * 里的同名 interface 合并，成为全局类型。往 Memory 里存新字段时，先在这里声明。
  */
 
-type CreepRole = "harvester" | "upgrader";
+type CreepRole = "harvester" | "upgrader" | "builder";
 
 interface CreepMemory {
   role: CreepRole;
@@ -15,6 +15,8 @@ interface CreepMemory {
   working: boolean;
   /** 缓存的能量源，避免每 tick 重新寻路查找 */
   sourceId?: Id<Source>;
+  /** builder 正在建的工地，盯住一个建完再换下一个 */
+  siteId?: Id<ConstructionSite>;
 }
 
 interface RoomMemory {

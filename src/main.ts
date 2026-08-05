@@ -1,4 +1,5 @@
 import { ErrorMapper } from "utils/ErrorMapper";
+import { runBuilder } from "roles/builder";
 import { runHarvester } from "roles/harvester";
 import { runRoomPlanner } from "planner/roomPlanner";
 import { runSpawnManager } from "managers/spawnManager";
@@ -27,6 +28,9 @@ export const loop = ErrorMapper.wrapLoop(() => {
         break;
       case "upgrader":
         runUpgrader(creep);
+        break;
+      case "builder":
+        runBuilder(creep);
         break;
       default:
         creep.say("无角色");

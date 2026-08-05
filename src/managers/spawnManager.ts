@@ -3,17 +3,26 @@
  * 加新角色时，改 CREEP_QUOTA 和 SPAWN_PRIORITY 两张表就够了。
  */
 
-/** 每个房间期望的各角色数量 */
-const CREEP_QUOTA: Record<CreepRole, number> = {
-  harvester: 3,
-  upgrader: 3
-};
+/**
+ * 每个房间期望的各角色数量。
+ * builder 是按需的：没有工地时一个都不要，免得白吃能量。
+ */
+function quotaFor(room: Room): Record<CreepRole, number> {
+  const sites = room.find(FIND_MY_CONSTRUCTION_SITES).length;
+
+  return {
+    harvester: 3,
+    upgrader: 3,
+    builder: sites > 0 ? 2 : 0
+  };
+}
 
 /**
  * 缺人时的补充顺序。harvester 排在最前面，
  * 因为没有它往 spawn 里送能量，后面谁都孵化不出来。
+ * builder 排在 upgrader 前面：有工地说明正在扩建，早点建完早点受益。
  */
-const SPAWN_PRIORITY: CreepRole[] = ["harvester", "upgrader"];
+const SPAWN_PRIORITY: CreepRole[] = ["harvester", "builder", "upgrader"];
 
 /** 一组 [WORK, CARRY, MOVE] 的造价 */
 const BODY_UNIT_COST = 200;
@@ -31,7 +40,8 @@ export function runSpawnManager(room: Room): void {
   if (!idleSpawn) return;
 
   const counts = countByRole(room);
-  const role = SPAWN_PRIORITY.find(candidate => counts[candidate] < CREEP_QUOTA[candidate]);
+  const quota = quotaFor(room);
+  const role = SPAWN_PRIORITY.find(candidate => counts[candidate] < quota[candidate]);
   if (!role) return;
 
   spawnCreep(idleSpawn, role, counts.harvester === 0);
@@ -65,7 +75,7 @@ function buildWorkerBody(energyBudget: number): BodyPartConstant[] {
 }
 
 function countByRole(room: Room): Record<CreepRole, number> {
-  const counts: Record<CreepRole, number> = { harvester: 0, upgrader: 0 };
+  const counts: Record<CreepRole, number> = { harvester: 0, upgrader: 0, builder: 0 };
 
   for (const creep of Object.values(Game.creeps)) {
     if (creep.memory.room !== room.name) continue;
