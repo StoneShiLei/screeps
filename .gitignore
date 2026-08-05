@@ -88,12 +88,8 @@ $RECYCLE.BIN/
 # Windows shortcuts
 *.lnk
 
-# ±¾µØ¹¤¾ß½Å±¾µÄÊä³ö
-room-map.txt
-scan-result.txt
-scan.txt
-
-# æœ¬åœ°å·¥å…·è„šæœ¬çš„è¾“å‡º
+# ???????????
 room-*.txt
-*-scan.txt
+scan-*.txt
 survey-*.txt
+safe*.txt
