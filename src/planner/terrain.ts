@@ -165,6 +165,31 @@ export function weightedDistanceFrom(
   return distance;
 }
 
+/**
+ * 房间的四条边哪几条有出口。
+ *
+ * 出口越少越好守：每个方向都要布防的话，rampart 和塔的压力成倍增加，
+ * 一面靠墙的房间等于白送一道城墙。
+ */
+export function exitSides(terrain: TerrainGrid): ("上" | "下" | "左" | "右")[] {
+  const sides: ("上" | "下" | "左" | "右")[] = [];
+  const last = ROOM_SIZE - 1;
+
+  const hasGap = (read: (i: number) => number): boolean => {
+    for (let i = 0; i < ROOM_SIZE; i++) {
+      if (read(i) !== TERRAIN_WALL) return true;
+    }
+    return false;
+  };
+
+  if (hasGap(x => terrain[x])) sides.push("上");
+  if (hasGap(x => terrain[last * ROOM_SIZE + x])) sides.push("下");
+  if (hasGap(y => terrain[y * ROOM_SIZE])) sides.push("左");
+  if (hasGap(y => terrain[y * ROOM_SIZE + last])) sides.push("右");
+
+  return sides;
+}
+
 /** 数一个点周围 8 格里有几格站得住人，决定这里能同时挤下几个 creep 干活 */
 export function countOpenSpots(terrain: TerrainGrid, x: number, y: number): number {
   let open = 0;

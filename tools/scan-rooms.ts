@@ -8,10 +8,13 @@
  * 用法：
  *   $env:TS_NODE_PROJECT="tsconfig.test.json"
  *   npx ts-node -r tsconfig-paths/register tools/scan-rooms.ts W11S26 W20S35
+ *
+ * 已经知道要看哪几个房间时，用 --list 跳过归属查询（那个接口的每小时配额很紧）：
+ *   npx ts-node -r tsconfig-paths/register tools/scan-rooms.ts --list E22S33 E28S36
  */
 
 import { RoomStatus, fetchMapStatsCached, fetchObjects, fetchTerrain } from "./api";
-import { countOpenSpots, decodeTerrain } from "planner/terrain";
+import { countOpenSpots, decodeTerrain, exitSides } from "planner/terrain";
 import { FIRST_SPAWN_OFFSET } from "planner/bunkerLayout";
 import { rankAnchors } from "planner/bunkerPlanner";
 
@@ -36,6 +39,8 @@ interface Candidate {
   sourceSpots: number[];
   /** 控制器周围能站几个 upgrader */
   controllerSpots: number;
+  /** 有出口的边，越少越好守 */
+  exits: string;
 }
 
 function parseRoomName(name: string): { horizontal: string; x: number; vertical: string; y: number } {
@@ -72,13 +77,15 @@ function isNoviceArea(status: RoomStatus | undefined, now: number): boolean {
   return !!status?.novice && status.novice > now;
 }
 
-async function main(): Promise<void> {
-  const [from, to] = process.argv.slice(2);
-  if (!from) {
-    console.log("用法: ts-node tools/scan-rooms.ts <起始房间> [结束房间]");
-    return;
+/** 已经确认过无主的房间可以直接分析，省下一次归属查询 */
+async function resolveTargets(args: string[]): Promise<string[]> {
+  if (args[0] === "--list") {
+    const rooms = args.slice(1);
+    console.log(`直接分析指定的 ${rooms.length} 个房间（跳过归属查询）\n`);
+    return rooms;
   }
 
+  const [from, to] = args;
   const target = to ? roomsInRange(from, to) : [from];
 
   console.log(`查询 ${target.length} 个房间的归属...`);
@@ -93,6 +100,18 @@ async function main(): Promise<void> {
 
   const owned = target.filter(name => stats[name]?.own).length;
   console.log(`其中 ${owned} 个已被占领，${free.length} 个无主且可占领，开始逐个分析地形\n`);
+  return free;
+}
+
+async function main(): Promise<void> {
+  const args = process.argv.slice(2);
+  if (args.length === 0) {
+    console.log("用法: ts-node tools/scan-rooms.ts <起始房间> [结束房间]");
+    console.log("      ts-node tools/scan-rooms.ts --list <房间名> <房间名> ...");
+    return;
+  }
+
+  const free = await resolveTargets(args);
 
   const candidates: Candidate[] = [];
   const rejected: { name: string; reason: string }[] = [];
@@ -133,7 +152,8 @@ async function main(): Promise<void> {
         swampCells: best.swampCells,
         anchorCount: ranked.length,
         sourceSpots: sources.map(s => countOpenSpots(terrain, s.x, s.y)),
-        controllerSpots: countOpenSpots(terrain, controller.x, controller.y)
+        controllerSpots: countOpenSpots(terrain, controller.x, controller.y),
+        exits: exitSides(terrain).join("")
       });
     } catch (error) {
       console.log(`  ${name} 失败: ${(error as Error).message}`);
@@ -143,15 +163,15 @@ async function main(): Promise<void> {
 
   candidates.sort((a, b) => a.cost - b.cost);
 
-  console.log("排名 房间     矿  锚点     成本 步数 到各点     spawn放这里 沼泽 源位 控位 锚点数");
+  console.log("排名 房间     矿  锚点     成本 步数 到各点     spawn放这里 沼泽 源位 控位 出口   锚点数");
   for (const [index, c] of candidates.entries()) {
     const spawn = `${c.anchor.x + FIRST_SPAWN_OFFSET.dx},${c.anchor.y + FIRST_SPAWN_OFFSET.dy}`;
     console.log(
       `${String(index + 1).padStart(3)}  ${c.name.padEnd(8)} ${c.mineral.padEnd(3)} ` +
-        `(${String(c.anchor.x).padStart(2)},${String(c.anchor.y).padStart(2)}) ${String(c.cost).padStart(4)} ` +
+        `(${String(c.anchor.x).padStart(2)},${String(c.anchor.y).padStart(2)}) ${c.cost.toFixed(0).padStart(4)} ` +
         `${String(c.steps).padStart(4)} ${c.distances.join("/").padEnd(10)} (${spawn.padEnd(6)}) ` +
         `${String(c.swampCells).padStart(4)} ${c.sourceSpots.join("/").padEnd(4)} ` +
-        `${String(c.controllerSpots).padStart(4)} ${String(c.anchorCount).padStart(6)}`
+        `${String(c.controllerSpots).padStart(4)} ${c.exits.padEnd(6)} ${String(c.anchorCount).padStart(5)}`
     );
   }
 
@@ -160,8 +180,9 @@ async function main(): Promise<void> {
   }
 
   console.log(
-    "\n成本 = 加权路程（沼泽按 5 倍算）+ bunker 内沼泽格数；步数 = 铺好路之后的距离\n" +
-      "源位/控位 = 能量源和控制器周围能站几个 creep，源位低于 2 会卡住早期采集"
+    "\n成本 = 步数 + 主干道上的沼泽格数 + bunker 内沼泽格数/4；步数 = 铺好路之后的距离\n" +
+      "源位/控位 = 能量源和控制器周围能站几个 creep，源位低于 2 会卡住早期采集，控位低会锁死升级速度\n" +
+      "出口 = 哪几条边有通路，越少越好守"
   );
 
   if (rejected.length) {
