@@ -9,6 +9,8 @@ const API = "https://screeps.com/api";
 
 export const SHARD = "shard3";
 
+const CACHE_DIR = ".cache";
+
 let cachedToken: string | undefined;
 
 function token(): string {
@@ -53,11 +55,25 @@ export interface RoomObject {
   mineralType?: string;
 }
 
+/**
+ * 地形一辈子不会变，所以只查一次就永久缓存在本地。
+ *
+ * 官方对 room-terrain 的限额是每小时 360 次，反复分析同一个房间时
+ * 很容易白白烧掉配额，而这些请求返回的内容一模一样。
+ */
 export async function fetchTerrain(room: string): Promise<string> {
+  const path = `${CACHE_DIR}/terrain-${SHARD}-${room}.txt`;
+  if (existsSync(path)) return readFileSync(path, "utf8");
+
   const data = await apiGet<{ terrain: { terrain: string }[] }>(
     `/game/room-terrain?room=${room}&shard=${SHARD}&encoded=1`
   );
-  return data.terrain[0].terrain;
+  const encoded = data.terrain[0].terrain;
+
+  if (!existsSync(CACHE_DIR)) mkdirSync(CACHE_DIR);
+  writeFileSync(path, encoded, "utf8");
+
+  return encoded;
 }
 
 export async function fetchObjects(room: string): Promise<RoomObject[]> {
@@ -94,8 +110,6 @@ export async function fetchMapStats(rooms: string[]): Promise<Record<string, Roo
 
   return result;
 }
-
-const CACHE_DIR = ".cache";
 
 /**
  * map-stats 的每小时配额很紧，而房间归属变化很慢，

@@ -1,9 +1,14 @@
 /**
  * 工作型角色获取能量的统一入口。
  *
- * 现阶段所有角色都只能自己跑去 source 采集。等房间建起 container / storage 之后，
- * 只要改这个文件让 gatherEnergy 优先从存储点取货，全部角色都会跟着切换。
+ * 取货顺序交给物流系统的供给表决定，自己挖是最后的退路。这个顺序很重要：
+ * 地上的能量、废墟和墓碑都会随时间蒸发，不抢在它们消失前捡走就是白扔；
+ * 容器里的能量是矿工现成挖好的，取一趟就满，比自己站着挖几十 tick 快得多。
  */
+
+import { claimSupply, isDropped, logisticsOf } from "../managers/logistics";
+import { announce } from "./logger";
+import { travelTo } from "../movement/move";
 
 /**
  * 根据身上的能量在"采集"和"干活"两种状态之间切换。
@@ -12,19 +17,34 @@
 export function refreshEnergyState(creep: Creep, workAction: string): void {
   if (creep.memory.working && creep.store[RESOURCE_ENERGY] === 0) {
     creep.memory.working = false;
-    creep.say("采集");
+    announce(creep, "采集");
   } else if (!creep.memory.working && creep.store.getFreeCapacity() === 0) {
     creep.memory.working = true;
-    creep.say(workAction);
+    // 认领没兑现就撒手，否则供给表会一直替它占着这份货
+    delete creep.memory.withdrawFrom;
+    announce(creep, workAction);
   }
 }
 
 export function gatherEnergy(creep: Creep): void {
+  const supply = claimSupply(creep, logisticsOf(creep.room).supplies);
+
+  if (supply) {
+    const result = isDropped(supply) ? creep.pickup(supply) : creep.withdraw(supply, RESOURCE_ENERGY);
+    if (result === ERR_NOT_IN_RANGE) {
+      travelTo(creep, supply, { visualizePathStyle: { stroke: "#ffaa00" } });
+    } else {
+      delete creep.memory.withdrawFrom;
+    }
+    return;
+  }
+
+  // 房间里没有现成的能量可捡，只能自己下矿
   const source = resolveSource(creep);
   if (!source) return;
 
   if (creep.harvest(source) === ERR_NOT_IN_RANGE) {
-    creep.moveTo(source, { visualizePathStyle: { stroke: "#ffaa00" } });
+    travelTo(creep, source, { visualizePathStyle: { stroke: "#ffaa00" } });
   }
 }
 

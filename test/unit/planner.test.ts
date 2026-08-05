@@ -1,6 +1,8 @@
 import { assert } from "chai";
 import { BUNKER_STRUCTURES, FIRST_SPAWN_OFFSET } from "../../src/planner/bunkerLayout";
-import { canPlaceBunker, rankAnchors, structuresForLevel } from "../../src/planner/bunkerPlanner";
+import { canPlaceBunker, isBunkerCell, rankAnchors, structuresForLevel } from "../../src/planner/bunkerPlanner";
+import { planOutposts } from "../../src/planner/outposts";
+import { unlockLevel } from "../../src/planner/roomPlanner";
 import {
   ROOM_SIZE,
   TERRAIN_PLAIN,
@@ -145,6 +147,22 @@ describe("bunker 布局", () => {
     assert.equal(structuresForLevel(8).length, BUNKER_STRUCTURES.length);
   });
 
+  it("bunker 内部容器推迟到 storage 那一级，别的建筑不受影响", () => {
+    const early = BUNKER_STRUCTURES.find(structure => structure.type === "container" && structure.rcl === 2);
+    const late = BUNKER_STRUCTURES.find(structure => structure.type === "container" && structure.rcl === 7);
+
+    assert.isDefined(early, "布局表里本来就有个 2 级的容器，覆盖逻辑就是为它写的");
+    assert.equal(unlockLevel(early!), 4, "没有 storage 配合的容器建出来只会白白 decay");
+    assert.equal(unlockLevel(late!), 7, "只推后不提前，7 级那个还是 7 级");
+  });
+
+  it("覆盖只作用于容器，其它建筑照布局表的等级", () => {
+    for (const structure of BUNKER_STRUCTURES) {
+      if (structure.type === "container") continue;
+      assert.equal(unlockLevel(structure), structure.rcl, structure.type);
+    }
+  });
+
   it("第一个 spawn 的偏移与布局数据一致", () => {
     const firstSpawn = BUNKER_STRUCTURES.find(s => s.type === "spawn" && s.rcl === 1);
 
@@ -217,5 +235,123 @@ describe("bunker 布局", () => {
   it("全是墙的房间找不到任何锚点", () => {
     const terrain = new Uint8Array(ROOM_SIZE * ROOM_SIZE).fill(TERRAIN_WALL);
     assert.deepEqual(rankAnchors(terrain, [{ x: 25, y: 25 }]), []);
+  });
+});
+
+describe("外围落点", () => {
+  const anchor = { x: 25, y: 25 };
+
+  it("采集点紧贴能量源，并且挑靠基地的那一侧", () => {
+    const source = { id: "s1", x: 35, y: 25 };
+    const { miningSpots } = planOutposts(emptyRoom(), anchor, [source], { x: 25, y: 40 });
+
+    const spot = miningSpots.s1;
+    assert.isDefined(spot, "能量源旁边必须有落点，否则矿工没地方站");
+    assert.isAtMost(Math.max(Math.abs(spot.x - source.x), Math.abs(spot.y - source.y)), 1, "站远了就挖不到");
+    assert.equal(spot.x, 34, "八个候选里应该挑离基地最近的那个");
+  });
+
+  it("两个能量源不会抢同一格", () => {
+    const sources = [
+      { id: "a", x: 30, y: 25 },
+      { id: "b", x: 32, y: 25 }
+    ];
+    const { miningSpots } = planOutposts(emptyRoom(), anchor, sources, { x: 25, y: 40 });
+
+    assert.notDeepEqual(miningSpots.a, miningSpots.b);
+  });
+
+  it("被墙围住的能量源没有落点", () => {
+    const terrain = emptyRoom();
+    for (let dy = -1; dy <= 1; dy++) {
+      for (let dx = -1; dx <= 1; dx++) {
+        if (dx !== 0 || dy !== 0) setWall(terrain, 35 + dx, 25 + dy);
+      }
+    }
+
+    const { miningSpots } = planOutposts(terrain, anchor, [{ id: "s1", x: 35, y: 25 }], { x: 25, y: 40 });
+    assert.isUndefined(miningSpots.s1);
+  });
+
+  it("升级点落在控制器两格以内，站上去就够得着", () => {
+    const controller = { x: 25, y: 40 };
+    const { upgradeSpot } = planOutposts(emptyRoom(), anchor, [], controller);
+
+    assert.isDefined(upgradeSpot);
+    const range = Math.max(Math.abs(upgradeSpot!.x - controller.x), Math.abs(upgradeSpot!.y - controller.y));
+    assert.isAtMost(range, 2, "超过两格的话，贴着容器的位置就可能够不到控制器");
+    assert.isAbove(range, 0, "不能直接压在控制器身上");
+  });
+
+  it("升级站位都在容器一格以内，站上去就同时够得着两边", () => {
+    const controller = { x: 25, y: 40 };
+    const { upgradeSpot, upgradeStations } = planOutposts(emptyRoom(), anchor, [], controller);
+
+    assert.isNotEmpty(upgradeStations);
+    for (const station of upgradeStations) {
+      const toContainer = Math.max(Math.abs(station.x - upgradeSpot!.x), Math.abs(station.y - upgradeSpot!.y));
+      assert.isAtMost(toContainer, 1, "离容器远了就取不到货");
+
+      const toController = Math.max(Math.abs(station.x - controller.x), Math.abs(station.y - controller.y));
+      assert.isAtMost(toController, 3, "超过三格就够不着控制器，取了货也升不了级");
+    }
+  });
+
+  it("容器自己那格也算一个站位", () => {
+    const { upgradeSpot, upgradeStations } = planOutposts(emptyRoom(), anchor, [], { x: 25, y: 40 });
+
+    assert.isTrue(
+      upgradeStations.some(station => station.x === upgradeSpot!.x && station.y === upgradeSpot!.y),
+      "容器不挡路，站上面取货距离算 0，白扔一个站位没道理"
+    );
+  });
+
+  it("控制器自己那格站不了人", () => {
+    const controller = { x: 25, y: 40 };
+    const { upgradeStations } = planOutposts(emptyRoom(), anchor, [], controller);
+
+    assert.isFalse(upgradeStations.some(station => station.x === controller.x && station.y === controller.y));
+  });
+
+  it("采集点不会被又算成升级站位", () => {
+    const source = { id: "s1", x: 25, y: 38 };
+    const { miningSpots, upgradeStations } = planOutposts(emptyRoom(), anchor, [source], { x: 25, y: 40 });
+
+    const mining = miningSpots.s1;
+    assert.isFalse(
+      upgradeStations.some(station => station.x === mining.x && station.y === mining.y),
+      "那是矿工的专座，升级工站上去矿工就没地方了"
+    );
+  });
+
+  it("宁可离基地远一点，也要挑站得下人的位置", () => {
+    const terrain = emptyRoom();
+    // 把靠基地那一侧的落点围起来，只留一条缝
+    for (const [x, y] of [
+      [24, 37],
+      [25, 37],
+      [26, 37],
+      [24, 38],
+      [26, 38],
+      [24, 39],
+      [26, 39]
+    ]) {
+      setWall(terrain, x, y);
+    }
+
+    const { upgradeSpot, upgradeStations } = planOutposts(terrain, anchor, [], { x: 25, y: 40 });
+
+    assert.isAtLeast(upgradeStations.length, 8, "挑个三面环墙的位置，等于给升级速度焊死一个上限");
+    assert.notDeepEqual(upgradeSpot, { x: 25, y: 38 }, "省那几步脚程完全不够赔");
+  });
+
+  it("落点不会压到 bunker 的占地上", () => {
+    // 把能量源摆在紧挨着基地的地方，逼着算法在 bunker 边缘挑格子
+    const source = { id: "s1", x: anchor.x + 7, y: anchor.y };
+    const { miningSpots } = planOutposts(emptyRoom(), anchor, [source], { x: 25, y: 40 });
+
+    const spot = miningSpots.s1;
+    assert.isDefined(spot);
+    assert.isFalse(isBunkerCell(anchor.x, anchor.y, spot.x, spot.y), "压在 bunker 上会和基地建筑抢位置");
   });
 });

@@ -1,12 +1,13 @@
 import { assert } from "chai";
 import { loop } from "../../src/main";
-import { createCreep, Game, Memory } from "./mock";
+import { createCreep, Game, installGameConstants, Memory } from "./mock";
 
 describe("main", () => {
   let consoleOutput: string[];
   let originalLog: typeof console.log;
 
   beforeEach(() => {
+    installGameConstants();
     // @ts-ignore : allow adding Game to global
     global.Game = _.clone(Game);
     // @ts-ignore : allow adding Memory to global

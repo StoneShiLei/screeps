@@ -6,6 +6,7 @@
  */
 
 import { gatherEnergy, refreshEnergyState } from "utils/energy";
+import { travelTo } from "../movement/move";
 
 export function runHarvester(creep: Creep): void {
   refreshEnergyState(creep, "运输");
@@ -31,7 +32,7 @@ function deliverEnergy(creep: Creep): void {
   }
 
   if (creep.transfer(target, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) {
-    creep.moveTo(target, { visualizePathStyle: { stroke: "#ffffff" } });
+    travelTo(creep, target, { visualizePathStyle: { stroke: "#ffffff" } });
   }
 }
 
@@ -40,6 +41,6 @@ function dumpIntoController(creep: Creep): void {
   if (!controller) return;
 
   if (creep.upgradeController(controller) === ERR_NOT_IN_RANGE) {
-    creep.moveTo(controller, { visualizePathStyle: { stroke: "#88ff88" } });
+    travelTo(creep, controller, { range: 3, visualizePathStyle: { stroke: "#88ff88" } });
   }
 }

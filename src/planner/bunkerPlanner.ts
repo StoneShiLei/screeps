@@ -47,6 +47,13 @@ function computeRequiredClearance(): number {
 
 const REQUIRED_CLEARANCE = computeRequiredClearance();
 
+const OCCUPIED_OFFSETS = new Set(OFFSETS.map(({ dx, dy }) => `${dx},${dy}`));
+
+/** 这一格是不是被 bunker 占了，规划外围设施时要避开 */
+export function isBunkerCell(anchorX: number, anchorY: number, x: number, y: number): boolean {
+  return OCCUPIED_OFFSETS.has(`${x - anchorX},${y - anchorY}`);
+}
+
 /** bunker 的 128 格是否都落在可建造的地面上 */
 export function canPlaceBunker(terrain: TerrainGrid, anchorX: number, anchorY: number): boolean {
   for (const { dx, dy } of OFFSETS) {
