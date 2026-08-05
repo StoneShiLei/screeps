@@ -3,7 +3,7 @@
  * token 从 screeps.json 读取，那个文件在 .gitignore 里，不会被提交。
  */
 
-import { readFileSync } from "fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
 
 const API = "https://screeps.com/api";
 
@@ -93,6 +93,37 @@ export async function fetchMapStats(rooms: string[]): Promise<Record<string, Roo
   }
 
   return result;
+}
+
+const CACHE_DIR = ".cache";
+
+/**
+ * map-stats 的每小时配额很紧，而房间归属变化很慢，
+ * 缓存到本地就能反复分析而不用重新查。
+ */
+export async function fetchMapStatsCached(rooms: string[], maxAgeMinutes = 120): Promise<Record<string, RoomStatus>> {
+  const path = `${CACHE_DIR}/map-stats-${SHARD}.json`;
+
+  let cache: { time: number; stats: Record<string, RoomStatus> } = { time: 0, stats: {} };
+  if (existsSync(path)) {
+    cache = JSON.parse(readFileSync(path, "utf8"));
+  }
+
+  const expired = Date.now() - cache.time > maxAgeMinutes * 60_000;
+  const missing = expired ? rooms : rooms.filter(name => !(name in cache.stats));
+
+  if (missing.length) {
+    console.log(`  缓存缺 ${missing.length} 个房间，向官方查询`);
+    const fresh = await fetchMapStats(missing);
+    cache = { time: expired ? Date.now() : cache.time || Date.now(), stats: { ...cache.stats, ...fresh } };
+
+    if (!existsSync(CACHE_DIR)) mkdirSync(CACHE_DIR);
+    writeFileSync(path, JSON.stringify(cache), "utf8");
+  } else {
+    console.log(`  全部命中本地缓存（${rooms.length} 个房间）`);
+  }
+
+  return cache.stats;
 }
 
 const usernameCache = new Map<string, string>();

@@ -17,6 +17,25 @@ export type TerrainGrid = Uint8Array;
 /** 每格到最近墙壁的切比雪夫距离，下标同 TerrainGrid */
 export type ClearanceGrid = Uint8Array;
 
+/**
+ * 从游戏里读取房间地形。
+ * Game.map.getRoomTerrain 对任意房间都有效，不需要视野，所以未探索的房间也能规划。
+ */
+export function terrainOfRoom(roomName: string): TerrainGrid {
+  const terrain = Game.map.getRoomTerrain(roomName);
+  const grid = new Uint8Array(ROOM_SIZE * ROOM_SIZE);
+
+  for (let y = 0; y < ROOM_SIZE; y++) {
+    for (let x = 0; x < ROOM_SIZE; x++) {
+      const mask = terrain.get(x, y);
+      grid[y * ROOM_SIZE + x] =
+        mask === TERRAIN_MASK_WALL ? TERRAIN_WALL : mask === TERRAIN_MASK_SWAMP ? TERRAIN_SWAMP : TERRAIN_PLAIN;
+    }
+  }
+
+  return grid;
+}
+
 /** 解析 Screeps API 返回的地形串：每个字符一格，1 是墙、2 是沼泽 */
 export function decodeTerrain(encoded: string): TerrainGrid {
   const grid = new Uint8Array(ROOM_SIZE * ROOM_SIZE);

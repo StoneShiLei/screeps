@@ -7,13 +7,35 @@
  * 和地形模块一样不依赖 Game 对象，本地选房脚本和游戏内规划共用。
  */
 
-import { ROOM_SIZE, TERRAIN_WALL, TerrainGrid, UNREACHABLE, walkingDistanceFrom } from "./terrain";
+import { ROOM_SIZE, TERRAIN_WALL, TerrainGrid, UNREACHABLE, distanceTransform, walkingDistanceFrom } from "./terrain";
 import { BUNKER_STRUCTURES } from "./bunkerLayout";
 
 /** 建筑不能贴房间边缘，出口附近也不适合当据点 */
 export const EDGE_MARGIN = 3;
 
 const OFFSETS = BUNKER_STRUCTURES.map(structure => ({ dx: structure.dx, dy: structure.dy }));
+
+/**
+ * 锚点至少要离墙多远。
+ *
+ * bunker 中心一圈是实心的，如果锚点周围半径 k 内全是建筑，那锚点的距离变换值
+ * 就必须大于 k。用这个值预筛选候选点，能在做逐格碰撞检测前砍掉绝大多数位置，
+ * 省下来的 CPU 在游戏里很关键。
+ */
+function computeRequiredClearance(): number {
+  const occupied = new Set(OFFSETS.map(({ dx, dy }) => `${dx},${dy}`));
+  occupied.add("0,0");
+
+  for (let radius = 1; ; radius++) {
+    for (let dx = -radius; dx <= radius; dx++) {
+      for (let dy = -radius; dy <= radius; dy++) {
+        if (!occupied.has(`${dx},${dy}`)) return radius;
+      }
+    }
+  }
+}
+
+const REQUIRED_CLEARANCE = computeRequiredClearance();
 
 /** bunker 的 128 格是否都落在可建造的地面上 */
 export function canPlaceBunker(terrain: TerrainGrid, anchorX: number, anchorY: number): boolean {
@@ -55,10 +77,13 @@ export interface PointOfInterest {
  */
 export function rankAnchors(terrain: TerrainGrid, targets: PointOfInterest[]): AnchorCandidate[] {
   const distanceMaps = targets.map(target => walkingDistanceFrom(terrain, target.x, target.y));
+  const clearance = distanceTransform(terrain);
   const candidates: AnchorCandidate[] = [];
 
   for (let y = EDGE_MARGIN; y < ROOM_SIZE - EDGE_MARGIN; y++) {
     for (let x = EDGE_MARGIN; x < ROOM_SIZE - EDGE_MARGIN; x++) {
+      // 先看一眼开阔度，不够的直接跳过，省下 128 格的碰撞检测
+      if (clearance[y * ROOM_SIZE + x] <= REQUIRED_CLEARANCE) continue;
       if (!canPlaceBunker(terrain, x, y)) continue;
 
       const index = y * ROOM_SIZE + x;

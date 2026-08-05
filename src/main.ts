@@ -1,5 +1,6 @@
 import { ErrorMapper } from "utils/ErrorMapper";
 import { runHarvester } from "roles/harvester";
+import { runRoomPlanner } from "planner/roomPlanner";
 import { runSpawnManager } from "managers/spawnManager";
 import { runUpgrader } from "roles/upgrader";
 
@@ -13,6 +14,7 @@ export const loop = ErrorMapper.wrapLoop(() => {
     // 只处理自己占领的房间，路过的、侦查到的房间先忽略
     if (!room.controller || !room.controller.my) continue;
     runSpawnManager(room);
+    runRoomPlanner(room);
   }
 
   for (const name in Game.creeps) {
