@@ -9,6 +9,8 @@ import { runUpgrader } from "roles/upgrader";
 // 否则游戏控制台里显示的都是打包后 main.js 的行号。
 export const loop = ErrorMapper.wrapLoop(() => {
   cleanupCreepMemory();
+  cleanupRoomMemory();
+  cleanupRoomMemory();
 
   for (const roomName in Game.rooms) {
     const room = Game.rooms[roomName];
@@ -43,6 +45,20 @@ function cleanupCreepMemory(): void {
   for (const name in Memory.creeps) {
     if (!(name in Game.creeps)) {
       delete Memory.creeps[name];
+    }
+  }
+}
+
+/**
+ * 丢掉已经不属于自己的房间的记录，比如 respawn 之后的旧家。
+ *
+ * 自己占领的房间一定有视野，所以在 Game.rooms 里找不到就是真的没了。
+ * 以后要记录外派采集的房间时，这里得改成白名单判断。
+ */
+function cleanupRoomMemory(): void {
+  for (const name in Memory.rooms) {
+    if (!Game.rooms[name]?.controller?.my) {
+      delete Memory.rooms[name];
     }
   }
 }
