@@ -71,9 +71,18 @@ async function main(): Promise<void> {
   const spawnY = best.y + FIRST_SPAWN_OFFSET.dy;
 
   console.log(`\n${name}`);
-  console.log(`  锚点 (${best.x},${best.y})   总路程 ${best.cost}   到各点 ${best.distances.join(" / ")}`);
-  console.log(`  第一个 spawn 放在 (${spawnX},${spawnY})   可选锚点 ${ranked.length} 个`);
-  console.log(`  # 墙   , 沼泽   E 能量源   C 控制器   M 矿`);
+  console.log(`  锚点 (${best.x},${best.y})   第一个 spawn 放在 (${spawnX},${spawnY})   可选锚点 ${ranked.length} 个`);
+  console.log(`\n  前几名位置的取舍（成本 = 步数 + 路上沼泽 + bunker沼泽/4）：`);
+  console.log(`    锚点      成本  步数 到各点     路上沼泽 bunker沼泽`);
+  for (const c of ranked.slice(0, 5)) {
+    const mark = c === best ? "→" : " ";
+    console.log(
+      `  ${mark} (${String(c.x).padStart(2)},${String(c.y).padStart(2)})  ${c.cost.toFixed(1).padStart(6)} ` +
+        `${String(c.steps).padStart(4)}  ${c.distances.join("/").padEnd(10)} ` +
+        `${c.swampOnPath.toFixed(0).padStart(6)}   ${String(c.swampCells).padStart(6)}`
+    );
+  }
+  console.log(`\n  # 墙   , 沼泽   E 能量源   C 控制器   M 矿`);
   console.log(`  s出生 e扩展 t塔 g仓库 m终端 l实验室 k链接 n核弹 p能量塔 o观察 c容器 .路\n`);
 
   let header = "     ";

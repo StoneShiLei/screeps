@@ -7,7 +7,17 @@
  * 和地形模块一样不依赖 Game 对象，本地选房脚本和游戏内规划共用。
  */
 
-import { ROOM_SIZE, TERRAIN_WALL, TerrainGrid, UNREACHABLE, distanceTransform, walkingDistanceFrom } from "./terrain";
+import {
+  ROOM_SIZE,
+  SWAMP_COST,
+  TERRAIN_SWAMP,
+  TERRAIN_WALL,
+  TerrainGrid,
+  UNREACHABLE,
+  distanceTransform,
+  walkingDistanceFrom,
+  weightedDistanceFrom
+} from "./terrain";
 import { BUNKER_STRUCTURES } from "./bunkerLayout";
 
 /** 建筑不能贴房间边缘，出口附近也不适合当据点 */
@@ -57,10 +67,18 @@ export function canPlaceBunker(terrain: TerrainGrid, anchorX: number, anchorY: n
 export interface AnchorCandidate {
   x: number;
   y: number;
-  /** 到各兴趣点的步数之和，越小越好 */
+  /** 排序用的综合成本，已经把沼泽的代价折算进去 */
   cost: number;
+  /** 到各兴趣点的纯步数之和，代表铺好路以后的距离 */
+  steps: number;
   /** 分别到每个兴趣点的步数，方便排查某个源特别远的情况 */
   distances: number[];
+  /** 到各兴趣点的加权路程之和，沼泽按 5 倍算，反映铺路前的实际耗时 */
+  weighted: number;
+  /** 三条主干道加起来要踩过多少格沼泽 */
+  swampOnPath: number;
+  /** bunker 那 128 格里有多少格是沼泽 */
+  swampCells: number;
 }
 
 export interface PointOfInterest {
@@ -69,14 +87,36 @@ export interface PointOfInterest {
 }
 
 /**
+ * 主干道上每经过一格沼泽，折算成多走几步。
+ *
+ * 沼泽的代价不是永久的：铺完路以后沼泽路和平原路一样快，真正的损失是
+ * 铺路前那段时间走得慢，加上铺这格路要多花 1200 能量。所以不能按移动成本的
+ * 5 倍直接计入——那会让"24 步全沼泽"输给"48 步全平原"，可长远看前者每趟都省一半时间。
+ * 记 1 步是个折中：既体现沼泽的开局拖累，又不至于淹没步数本身的长期价值。
+ */
+const PATH_SWAMP_PENALTY = 1;
+
+/**
+ * bunker 占地内每格沼泽折算成多走几步。
+ *
+ * 建筑压在沼泽上不额外花钱，受影响的只有铺在建筑之间的路，
+ * 而基地内部的通行距离本来就短，所以权重比主干道低得多。
+ */
+const BUNKER_SWAMP_PENALTY = 0.25;
+
+/**
  * 给房间里所有能放下 bunker 的位置打分并排序。
  *
- * 打分方式是把锚点到每个能量源、控制器的步数加起来。先对每个兴趣点各做一次
- * 广度优先搜索得到全房间的距离图，之后每个候选锚点只要查表相加，
+ * 先对每个兴趣点各做一次全房间的距离搜索，之后每个候选锚点只要查表相加，
  * 比"每个候选点单独寻路"快几个数量级。
+ *
+ * 打分同时看两件事：加权路程（沼泽算 5 倍，决定开局几千 tick 的效率）
+ * 和 bunker 占地内的沼泽格数（决定铺路要多花多少能量）。纯步数也一并返回，
+ * 那代表基地成型铺好路之后的距离。
  */
 export function rankAnchors(terrain: TerrainGrid, targets: PointOfInterest[]): AnchorCandidate[] {
-  const distanceMaps = targets.map(target => walkingDistanceFrom(terrain, target.x, target.y));
+  const stepMaps = targets.map(target => walkingDistanceFrom(terrain, target.x, target.y));
+  const weightedMaps = targets.map(target => weightedDistanceFrom(terrain, target.x, target.y));
   const clearance = distanceTransform(terrain);
   const candidates: AnchorCandidate[] = [];
 
@@ -87,19 +127,40 @@ export function rankAnchors(terrain: TerrainGrid, targets: PointOfInterest[]): A
       if (!canPlaceBunker(terrain, x, y)) continue;
 
       const index = y * ROOM_SIZE + x;
-      const distances = distanceMaps.map(map => map[index]);
+      const distances = stepMaps.map(map => map[index]);
       if (distances.some(d => d === UNREACHABLE)) continue;
+
+      const weighted = weightedMaps.reduce((sum, map) => sum + map[index], 0);
+      const swampCells = countSwampCells(terrain, x, y);
+      const steps = distances.reduce((sum, d) => sum + d, 0);
+      // 加权路程每比步数多 SWAMP_COST-1，就说明路上多踩了一格沼泽
+      const swampOnPath = (weighted - steps) / (SWAMP_COST - 1);
 
       candidates.push({
         x,
         y,
-        cost: distances.reduce((sum, d) => sum + d, 0),
-        distances
+        cost: steps + swampOnPath * PATH_SWAMP_PENALTY + swampCells * BUNKER_SWAMP_PENALTY,
+        steps,
+        distances,
+        weighted,
+        swampOnPath,
+        swampCells
       });
     }
   }
 
   return candidates.sort((a, b) => a.cost - b.cost);
+}
+
+/** bunker 占地范围内的沼泽格数，主要影响内部道路的造价和维护 */
+export function countSwampCells(terrain: TerrainGrid, anchorX: number, anchorY: number): number {
+  let swamp = 0;
+
+  for (const { dx, dy } of OFFSETS) {
+    if (terrain[(anchorY + dy) * ROOM_SIZE + anchorX + dx] === TERRAIN_SWAMP) swamp++;
+  }
+
+  return swamp;
 }
 
 /** 按 RCL 过滤出该等级应该存在的建筑 */

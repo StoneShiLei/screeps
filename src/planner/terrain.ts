@@ -98,11 +98,95 @@ export function distanceTransform(terrain: TerrainGrid): ClearanceGrid {
 /** 到不了的格子用这个值表示 */
 export const UNREACHABLE = 65535;
 
+/** 沼泽的移动成本是平原的 5 倍，这是游戏规则里的固定值 */
+export const SWAMP_COST = 5;
+
+/**
+ * 按地形加权算通行成本：沼泽记 SWAMP_COST，平原记 1。
+ *
+ * 为什么不能只数格子——没铺路时 creep 过一格沼泽的时间等于走五格平原；
+ * 铺路本身在沼泽上要 1500 能量（平原只要 300）；铺好之后沼泽路的衰减速度仍是 5 倍。
+ * 所以"8 步但全程沼泽"的路线实际比"11 步全平原"差得多。
+ *
+ * 权重只有 1 和 5 两种取值，用桶队列（Dial 算法）就够，不必上二叉堆。
+ */
+export function weightedDistanceFrom(
+  terrain: TerrainGrid,
+  startX: number,
+  startY: number,
+  swampCost = SWAMP_COST
+): Uint16Array {
+  const size = ROOM_SIZE * ROOM_SIZE;
+  const distance = new Uint16Array(size).fill(UNREACHABLE);
+  const bucketCount = swampCost + 1;
+  const buckets: number[][] = [];
+  for (let i = 0; i < bucketCount; i++) buckets.push([]);
+
+  const start = startY * ROOM_SIZE + startX;
+  distance[start] = 0;
+  buckets[0].push(start);
+
+  let pending = 1;
+  const maxCost = size * swampCost;
+
+  for (let cost = 0; pending > 0 && cost <= maxCost; cost++) {
+    const bucket = buckets[cost % bucketCount];
+
+    while (bucket.length > 0) {
+      const index = bucket.pop() as number;
+      pending--;
+      // 同一格可能被多次入桶，只处理其中最优的那次
+      if (distance[index] !== cost) continue;
+
+      const x = index % ROOM_SIZE;
+      const y = (index - x) / ROOM_SIZE;
+
+      for (let dy = -1; dy <= 1; dy++) {
+        for (let dx = -1; dx <= 1; dx++) {
+          if (dx === 0 && dy === 0) continue;
+          const nx = x + dx;
+          const ny = y + dy;
+          if (nx < 0 || ny < 0 || nx >= ROOM_SIZE || ny >= ROOM_SIZE) continue;
+
+          const neighbour = ny * ROOM_SIZE + nx;
+          if (terrain[neighbour] === TERRAIN_WALL) continue;
+
+          const next = cost + (terrain[neighbour] === TERRAIN_SWAMP ? swampCost : 1);
+          if (next >= distance[neighbour]) continue;
+
+          distance[neighbour] = next;
+          buckets[next % bucketCount].push(neighbour);
+          pending++;
+        }
+      }
+    }
+  }
+
+  return distance;
+}
+
+/** 数一个点周围 8 格里有几格站得住人，决定这里能同时挤下几个 creep 干活 */
+export function countOpenSpots(terrain: TerrainGrid, x: number, y: number): number {
+  let open = 0;
+
+  for (let dy = -1; dy <= 1; dy++) {
+    for (let dx = -1; dx <= 1; dx++) {
+      if (dx === 0 && dy === 0) continue;
+      const nx = x + dx;
+      const ny = y + dy;
+      if (nx < 0 || ny < 0 || nx >= ROOM_SIZE || ny >= ROOM_SIZE) continue;
+      if (terrain[ny * ROOM_SIZE + nx] !== TERRAIN_WALL) open++;
+    }
+  }
+
+  return open;
+}
+
 /**
  * 从一个点出发做广度优先搜索，算出到房间内每一格要走几步。
  *
- * creep 可以斜着走，所以是 8 邻域。这里不区分平原和沼泽——
- * 主干道最终都会铺路，铺完路两者速度一样，按步数算反而更接近成型后的实际情况。
+ * creep 可以斜着走，所以是 8 邻域。这里只数格子不看地形，
+ * 得到的是主干道铺好之后的距离；铺路前的实际耗时要用 weightedDistanceFrom。
  */
 export function walkingDistanceFrom(terrain: TerrainGrid, startX: number, startY: number): Uint16Array {
   const distance = new Uint16Array(ROOM_SIZE * ROOM_SIZE).fill(UNREACHABLE);
