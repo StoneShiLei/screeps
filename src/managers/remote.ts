@@ -629,9 +629,14 @@ function checkControllerAccess(room: Room, memory: RoomMemory): void {
 
   const wall = { x: plan.wall.pos.x, y: plan.wall.pos.y };
   const known = memory.breach?.wall;
-  if (known && known.x === wall.x && known.y === wall.y) return;
+  const sameWall = known && known.x === wall.x && known.y === wall.y;
 
   memory.breach = { wall, hits: plan.hits, walls: plan.walls };
+
+  // 还是同一段墙就只更新血量，不再吼一遍。这个数每次复查都在掉，面板照着它
+  // 画进度；日志只在开工和换目标时说话
+  if (sameWall) return;
+
   log.warn(
     "外矿",
     `${room.name} 的控制器被墙封住：要拆 ${plan.walls} 段共 ${plan.hits} 血，先从 (${wall.x},${wall.y}) 开刀`
