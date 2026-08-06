@@ -25,16 +25,31 @@ const REPAIR_RESERVE = 500;
 const REPAIR_INTERVAL = 10;
 
 /**
- * 墙和城墙不进修理名单。
+ * 墙不进修理名单。
  *
- * 它们的 hitsMax 是三亿，塔修一次 800 点，放开修就是把房间所有能量
- * 无限期倒进一堵永远修不满的墙。防御工事该按当前威胁单独定血量目标，
- * 那是以后的事。
+ * hitsMax 是三亿，塔修一次 800 点，放开修就是把房间所有能量无限期倒进
+ * 一堵永远修不满的墙。完整的外墙血量目标是以后的事。
+ *
+ * rampart 另算：图纸上盖在 spawn / 塔上的那几格有明确的软上限，见
+ * rampartHitsTarget——不修的话 300 hits/100 tick 的衰减会把新建的城墙啃光，
+ * 白花建造的能量。
  *
  * 写字面量而不是 STRUCTURE_* 常量：那些常量只在游戏运行时存在，模块顶层
  * 引用会让单元测试在加载阶段就崩掉。
  */
-const SKIP_REPAIR: StructureConstant[] = ["constructedWall", "rampart"];
+const SKIP_REPAIR: StructureConstant[] = ["constructedWall"];
+
+/**
+ * 图纸上的 rampart 修到这个血量就停。
+ *
+ * RCL5 才开始盖；一万够挡零星骚扰，再高就按等级抬。绝不能用 hitsMax——
+ * 那是三亿，塔会把整房能量砸进去。
+ */
+export function rampartHitsTarget(level: number): number {
+  if (level >= 6) return 100_000;
+  if (level >= 5) return 50_000;
+  return 10_000;
+}
 
 /**
  * 手无寸铁的邻居进到这个距离以内才开火。
@@ -130,13 +145,21 @@ function nearest<T extends { pos: RoomPosition }>(from: RoomPosition, candidates
   return best;
 }
 
-/** 按残血比例挑最惨的那个，而不是绝对血量——不然永远轮不到血条短的容器 */
+/**
+ * 按相对目标血量的残血比例挑最惨的那个。
+ *
+ * 不用绝对血量——不然永远轮不到血条短的容器。rampart 的 hitsMax 是三亿，
+ * 若按 hitsMax 算比例，任何掉了一点的 rampart 都会永远压过路和容器，
+ * 所以改用我们自己定的软上限。
+ */
 function weakest(structures: Structure[]): Structure | undefined {
   let best: Structure | undefined;
   let bestRatio = 1;
 
   for (const structure of structures) {
-    const ratio = structure.hits / structure.hitsMax;
+    const goal = hitsGoal(structure);
+    if (goal <= 0) continue;
+    const ratio = structure.hits / goal;
     if (ratio < bestRatio) {
       best = structure;
       bestRatio = ratio;
@@ -144,6 +167,13 @@ function weakest(structures: Structure[]): Structure | undefined {
   }
 
   return best;
+}
+
+function hitsGoal(structure: Structure): number {
+  if (structure.structureType === "rampart") {
+    return rampartHitsTarget(structure.room?.controller?.level ?? 0);
+  }
+  return structure.hitsMax;
 }
 
 /**
@@ -165,8 +195,16 @@ function repairTargets(room: Room): Structure[] {
 }
 
 function isWorthRepairing(room: Room, structure: Structure): boolean {
-  if (structure.hits >= structure.hitsMax) return false;
   if (SKIP_REPAIR.includes(structure.structureType)) return false;
+
+  if (structure.structureType === "rampart") {
+    // 只修图纸上盖在 spawn / 塔上的那些，修到软上限为止
+    if (!("my" in structure) || !structure.my) return false;
+    if (!isPlanned(room, "rampart", structure.pos.x, structure.pos.y)) return false;
+    return structure.hits < rampartHitsTarget(room.controller?.level ?? 0);
+  }
+
+  if (structure.hits >= structure.hitsMax) return false;
 
   // 有主的东西只修自己的
   if ("my" in structure) return structure.my === true;

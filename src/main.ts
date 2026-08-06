@@ -1,5 +1,5 @@
 import { cleanupCreepMemory, cleanupRoomMemory } from "utils/memory";
-import { evade, reportThreat, runDefender } from "roles/defender";
+import { evade, reportThreat, runDefender, runGuardian } from "roles/defender";
 import { runLootManager, trackLoot } from "managers/loot";
 import { runRemoteManager, watchRemote } from "managers/remote";
 import { ErrorMapper } from "utils/ErrorMapper";
@@ -69,6 +69,11 @@ export const loop = ErrorMapper.wrapLoop(() => {
 
     if (creep.memory.role === "defender") {
       runDefender(creep);
+      continue;
+    }
+
+    if (creep.memory.role === "guardian") {
+      runGuardian(creep);
       continue;
     }
 

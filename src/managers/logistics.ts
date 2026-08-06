@@ -6,6 +6,9 @@
  *
  * 防止多个 hauler 扑同一个目标靠**扣减在途量**：算某个目标还缺多少时，
  * 把所有已经认领它的 hauler 身上的货先减掉。取货端同理，扣掉正在赶来的空余容量。
+ *
+ * 认领时要在扣减里把自己排除掉——否则自己的在途量把目标扣到消失，下一 tick
+ * 以为目标没了，又去挑一个新的，表现为搬运工在房间里来回换目标晃悠。
  */
 
 import { isPlanned } from "../planner/roomPlanner";
@@ -26,9 +29,6 @@ export const DEMAND_PRIORITY = {
    *
    * 它的用处是让 spawn 旁边随时有一桶现成的能量，补 extension 不用跑到矿边去；
    * 但那是"别处都不缺了"之后才谈得上的奢侈，所以优先级压在 storage 之后。
-   *
-   * 没有这一档的时候它是个死物：不在需求表里，永远没人填，却照样每 100 tick
-   * 掉血、照样要人修。
    */
   buffer: 4
 };
@@ -39,16 +39,36 @@ export const SUPPLY_PRIORITY = {
   dropped: 0,
   /** 墓碑和废墟也会消失 */
   decaying: 0,
+  /**
+   * 自有房间里前人留下的 storage / terminal。
+   *
+   * 不再生、还占着建筑上限，抽干之后正好拆掉腾位置；比矿边容器还急。
+   */
+  salvage: 1,
   /** 能量源旁的容器，满了矿工就得停工 */
-  source: 1,
+  source: 2,
   /** 基地内的缓冲容器 */
-  buffer: 2,
+  buffer: 3,
   /** 动用库存是最后的手段 */
-  storage: 3
+  storage: 4
 };
 
 /** tower 装到这个比例以上就不再补，免得 hauler 为了几十点能量反复跑 */
 const TOWER_REFILL_THRESHOLD = 0.8;
+
+/**
+ * 控制器粮仓 / 缓冲桶的滞回区间。
+ *
+ * 低于 LOW 才进需求表，送货途中一直补到 HIGH。单阈值会抖：送一趟刚过线 →
+ * 表里消失 → 升级工几 tick 又吃穿 → 搬运工再跑一趟。
+ *
+ * 缓冲桶作供给时挂 LOW 以上可取、只留 LOW 那点垫底：它就是基地的现成能量缓存，
+ * builder/upgrader 本该从里面舀能量花，之前卡在 HIGH 会把 500~1500 那一整段锁死，
+ * 桶里明明有货工人却站着不动。留 LOW 是个小余量，跌破了需求表再把它补回 HIGH。
+ * 搬运工不会拿它空转——没需求时 availableSupplies 只捡会蒸发/会溢出的那几档。
+ */
+const CONTAINER_REFILL_LOW = 500;
+const CONTAINER_REFILL_HIGH = 1500;
 
 /** 低于这个量的供给不值得专门跑一趟 */
 const MIN_PICKUP_AMOUNT = 50;
@@ -78,12 +98,30 @@ export function isDropped(target: LogisticsTarget): target is Resource {
 /**
  * spawn 和 extension 还缺不缺能量。
  *
- * 这是全房间唯一一条"填不上就什么都干不了"的需求：孵化和补人全指着它，空着的时候
- * 建造和升级快一点慢一点都无所谓。所以它有缺口时，自己不采集的角色要让开矿边容器
- * ——那是搬运工唯一的货源。
+ * 这是全房间唯一一条"填不上就什么都干不了"的需求：孵化和补人全指着它。
  */
 export function feedingSpawn(room: Room): boolean {
   return logisticsOf(room).demands.some(entry => entry.priority <= DEMAND_PRIORITY.spawn);
+}
+
+/**
+ * 房间里此刻有没有本土搬运工。
+ *
+ * 只认站在这个房间、角色是 hauler 的。remoteHauler 不算。
+ */
+export function hasHaulers(room: Room): boolean {
+  return Object.values(Game.creeps).some(
+    creep => creep.memory.role === "hauler" && creep.room.name === room.name
+  );
+}
+
+/**
+ * 缓冲容器这一档该排多靠前。
+ *
+ * 有工地时提到和控制器粮仓同级；没工地时退回最后一档。
+ */
+export function bufferDemandPriority(sites: number): number {
+  return sites > 0 ? DEMAND_PRIORITY.controller : DEMAND_PRIORITY.buffer;
 }
 
 /** 这个目标现在还有多少能量能拿 */
@@ -94,15 +132,17 @@ export function amountIn(target: LogisticsTarget): number {
 /**
  * 从供给表里挑一个目标去取货，并登记认领。
  *
- * 登记这一步不只是给 hauler 用的：任何 creep 认领之后，它的空余容量都会
- * 从供给表里扣掉，别人就不会再扑同一堆能量。房间里躺着几十个废墟时，
- * 没有这层登记的话所有 creep 会一起冲向最近的那个。
+ * 调用方应传入 logisticsOf(room, creep) 的供给——把自己排除在扣减之外，
+ * 否则自己的空余容量会把货源扣没，下一 tick 又换目标。
  */
 export function claimSupply(creep: Creep, supplies: LogisticsEntry[]): LogisticsTarget | null {
   const remembered = creep.memory.withdrawFrom
     ? Game.getObjectById(creep.memory.withdrawFrom as Id<LogisticsTarget>)
     : null;
-  if (remembered && amountIn(remembered) > 0) return remembered;
+
+  if (remembered && supplyStillOpen(remembered, creep.room) && supplies.some(entry => entry.id === remembered.id)) {
+    return remembered;
+  }
 
   const chosen = chooseReachable(creep, supplies);
   if (!chosen) {
@@ -117,15 +157,24 @@ export function claimSupply(creep: Creep, supplies: LogisticsEntry[]): Logistics
 /**
  * 从需求表里挑一个目标去送货，并登记认领。
  *
- * 和 claimSupply 对称。先看认领过的那个还算不算数，不算了再挑新的——顺序不能反：
- * 需求表里已经扣掉了自己认领的那份，直接挑新目标的话，自己刚认领的目标会因为
- * "已经不缺了"而落选，于是每 tick 换一个目标来回跑。
+ * 粘住旧目标的条件：
+ * 1. 建筑客观上还收得下能量（容器按 HIGH 算，不是按需求表）
+ * 2. 表里没有比它更急的档
+ *
+ * 不要求旧目标还在需求表里——自己的在途量经常正好把它扣没；要求在表里
+ * 就会每 tick 换目标。更急的档出现时（比如粮仓途中 spawn 空了）才改道。
  */
 export function claimDemand(creep: Creep, demands: LogisticsEntry[]): AnyStoreStructure | null {
   const remembered = creep.memory.deliverTo
     ? Game.getObjectById(creep.memory.deliverTo as Id<AnyStoreStructure>)
     : null;
-  if (remembered && remembered.store.getFreeCapacity(RESOURCE_ENERGY)) return remembered;
+
+  if (remembered && demandStillOpen(remembered)) {
+    const mine = demandPriorityOf(remembered, creep.room);
+    if (mine !== undefined && !demands.some(entry => entry.priority < mine)) {
+      return remembered;
+    }
+  }
 
   const chosen = chooseReachable(creep, demands);
   if (!chosen) {
@@ -163,19 +212,13 @@ export function deductReservations(entries: LogisticsEntry[], reservations: Rese
 /**
  * 挑目标，同优先级里按真正要走几步算最近。
  *
- * 直线距离在 bunker 里会骗人。基地内部的 extension 是一条条斜带，中间只留一格
- * 宽的路，两个直线距离 2 格的 extension 常常隔着一整排别的建筑，绕过去要走六七步。
- * 照直线挑，hauler 装填时就会在基地里来回横穿：明明脚边那个没填，却先去了
- * "看起来更近"的对岸。
- *
- * 只在同一档优先级里比路程，跨档不比——优先级表达的是紧迫程度，比距离重要。
- * 寻路只在换目标那一 tick 跑（认领之后会一直记着），所以这笔开销摊得很薄。
+ * 直线距离在 bunker 里会骗人。只在同一档优先级里比路程，跨档不比。
+ * 寻路只在换目标那一 tick 跑（认领之后会一直记着）。
  */
 function chooseReachable(creep: Creep, entries: LogisticsEntry[]): LogisticsEntry | undefined {
   const fallback = chooseEntry(creep.pos.x, creep.pos.y, entries);
   if (!fallback) return undefined;
 
-  // 表是别的房间的（外派人员在回家路上就会这样），跨房间寻路又贵又没意义
   const sample = Game.getObjectById(fallback.id as Id<LogisticsTarget>);
   if (!sample || sample.room?.name !== creep.room.name) return fallback;
 
@@ -185,8 +228,7 @@ function chooseReachable(creep: Creep, entries: LogisticsEntry[]): LogisticsEntr
   const byCell = new Map(group.map(entry => [`${entry.x},${entry.y}`, entry]));
   const goals = group.map(entry => new RoomPosition(entry.x, entry.y, creep.room.name));
 
-  // range 1 是必须的：extension 那一格本身站不进去，要求走到目标格上会直接判无路。
-  // ignoreCreeps 让结果稳定，否则同伴挪一步就换一个目标
+  // range 1：extension 那一格站不进去。ignoreCreeps 让结果稳定
   const closest = creep.pos.findClosestByPath(goals, { ignoreCreeps: true, range: 1 });
   if (!closest) return fallback;
 
@@ -195,9 +237,6 @@ function chooseReachable(creep: Creep, entries: LogisticsEntry[]): LogisticsEntr
 
 /**
  * 挑一个最划算的目标：先看优先级，同优先级里挑最近的（直线）。
- *
- * 不按"缺口大小"排序是有意的。优先级已经表达了紧迫程度，
- * 再掺进缺口大小只会让 hauler 舍近求远去填一个大但不急的坑。
  */
 export function chooseEntry(fromX: number, fromY: number, entries: LogisticsEntry[]): LogisticsEntry | undefined {
   let best: LogisticsEntry | undefined;
@@ -220,10 +259,7 @@ export function chooseEntry(fromX: number, fromY: number, entries: LogisticsEntr
 }
 
 /**
- * 把供需状态画在房间里：需求点标红色缺口，供给点标绿色存量，
- * 每个 hauler 和它的目标之间连一条线。
- *
- * 运力够不够、是不是全堵在某一个环节，扫一眼房间就知道，不用翻日志。
+ * 把供需状态画在房间里。
  */
 export function visualizeLogistics(room: Room): void {
   if (!isVisualOn("logistics")) return;
@@ -258,37 +294,45 @@ interface CachedLogistics extends RoomLogistics {
   tick: number;
 }
 
-/** 一个房间一个 tick 只算一次，房间里所有 hauler 共用这份结果 */
+/** 一个房间一个 tick 只算一次；带 ignore 时按 creep 名分开缓存 */
 const cache: Record<string, CachedLogistics> = {};
 
-export function logisticsOf(room: Room): RoomLogistics {
-  const cached = cache[room.name];
+/**
+ * 房间供需表。
+ *
+ * @param ignore 认领时传入自己，扣减在途量时跳过它，避免把自己的目标扣没
+ */
+export function logisticsOf(room: Room, ignore?: Creep): RoomLogistics {
+  const key = ignore ? `${room.name}:${ignore.name}` : room.name;
+  const cached = cache[key];
   if (cached && cached.tick === Game.time) return cached;
 
-  const reservations = collectReservations(room);
+  const reservations = collectReservations(room, ignore?.name);
   const result: CachedLogistics = {
     tick: Game.time,
     supplies: deductReservations(collectSupplies(room), reservations.pickups),
     demands: deductReservations(collectDemands(room), reservations.deliveries)
   };
 
-  cache[room.name] = result;
+  cache[key] = result;
   return result;
 }
 
 /**
  * 把已经认领的活折算成在途量。
  *
- * 送货端扣的是 creep 身上的货，取货端扣的是它的空余容量——
- * 它到了就会把那么多货取走，后来者不该再指望这部分。
- *
- * 不限角色：builder 和 upgrader 去捡废墟时也会登记，一起纳入这套避让。
+ * 送货端扣的是 creep 身上的货，取货端扣的是它的空余容量。
+ * ignoreName 跳过正在做决定的那个 creep。
  */
-function collectReservations(room: Room): { pickups: Reservation[]; deliveries: Reservation[] } {
+function collectReservations(
+  room: Room,
+  ignoreName?: string
+): { pickups: Reservation[]; deliveries: Reservation[] } {
   const pickups: Reservation[] = [];
   const deliveries: Reservation[] = [];
 
   for (const creep of Object.values(Game.creeps)) {
+    if (ignoreName && creep.name === ignoreName) continue;
     if (!concerns(creep, room.name)) continue;
 
     if (creep.memory.deliverTo) {
@@ -303,15 +347,9 @@ function collectReservations(room: Room): { pickups: Reservation[]; deliveries: 
 }
 
 /**
- * 这个 creep 的认领算不算在这个房间头上。
+ * 只认此刻就站在这个房间里的。
  *
- * 只认此刻就站在这个房间里的。在途量的全部意义是"它马上就到，别人不用再来"，
- * 隔着两个房间的认领不满足这个前提，只会把需求表锁死。
- *
- * 这条曾经写成"归属本房间的也算"，代价是隔壁房间里一个 looter 就能让老家的
- * 某个 extension 永远填不上：looter 的 memory.room 是老家，它带着上一趟的
- * deliverTo 去外矿装货，往返一百多 tick 里那个 extension 在需求表里一直显示
- * 已被认领，于是没有任何 hauler 去填它，而认领它的人在另一个房间搬货。
+ * 隔着房间的认领不满足"马上就到"，只会把需求表锁死。
  */
 function concerns(creep: Creep, roomName: string): boolean {
   return creep.room.name === roomName;
@@ -333,27 +371,23 @@ function collectDemands(room: Room): LogisticsEntry[] {
     }
   }
 
-  // 容器没有归属，不在 FIND_MY_STRUCTURES 里，得单独遍历
   const miningSpots = Object.values(room.memory.miningSpots ?? {});
+  const sites = room.find(FIND_MY_CONSTRUCTION_SITES).length;
+  const bufferPriority = bufferDemandPriority(sites);
 
   for (const structure of room.find(FIND_STRUCTURES)) {
     if (structure.structureType !== STRUCTURE_CONTAINER) continue;
 
     const { x, y } = structure.pos;
     if (upgradeSpot && x === upgradeSpot.x && y === upgradeSpot.y) {
-      pushIfHungry(demands, structure, DEMAND_PRIORITY.controller);
+      pushContainerDemand(demands, structure, DEMAND_PRIORITY.controller);
       continue;
     }
 
-    // 矿边的容器只出不进。往里送就成了死循环：矿工挖满、搬运工搬走、
-    // 搬运工又发现它缺货再送回来
     if (miningSpots.some(spot => spot.x === x && spot.y === y)) continue;
-
-    // 只填图纸上的。占领带旧基地的房间时地上会留着前人的容器，往里送货
-    // 等于替对方囤粮
     if (!isPlanned(room, STRUCTURE_CONTAINER, x, y)) continue;
 
-    pushIfHungry(demands, structure, DEMAND_PRIORITY.buffer);
+    pushContainerDemand(demands, structure, bufferPriority);
   }
 
   return demands;
@@ -385,15 +419,33 @@ function collectSupplies(room: Room): LogisticsEntry[] {
 
   for (const structure of room.find(FIND_STRUCTURES)) {
     if (structure.structureType === STRUCTURE_CONTAINER) {
-      // 控制器旁的容器是升级工的粮仓，只进不出
       if (upgradeSpot && structure.pos.x === upgradeSpot.x && structure.pos.y === upgradeSpot.y) continue;
 
-      const priority = isMiningSpot(structure.pos.x, structure.pos.y)
-        ? SUPPLY_PRIORITY.source
-        : SUPPLY_PRIORITY.buffer;
-      pushIfStocked(supplies, structure, priority);
-    } else if (structure.structureType === STRUCTURE_STORAGE) {
-      pushIfStocked(supplies, structure, SUPPLY_PRIORITY.storage);
+      if (isMiningSpot(structure.pos.x, structure.pos.y)) {
+        pushIfStocked(supplies, structure, SUPPLY_PRIORITY.source);
+      } else {
+        const drawable = structure.store[RESOURCE_ENERGY] - CONTAINER_REFILL_LOW;
+        if (drawable >= MIN_PICKUP_AMOUNT) {
+          supplies.push({
+            id: structure.id,
+            x: structure.pos.x,
+            y: structure.pos.y,
+            amount: drawable,
+            priority: SUPPLY_PRIORITY.buffer
+          });
+        }
+      }
+    } else if (structure.structureType === STRUCTURE_STORAGE || structure.structureType === STRUCTURE_TERMINAL) {
+      if (!room.controller?.my) continue;
+      if (!("my" in structure)) continue;
+
+      if (structure.my) {
+        if (structure.structureType === STRUCTURE_STORAGE) {
+          pushIfStocked(supplies, structure, SUPPLY_PRIORITY.storage);
+        }
+      } else {
+        pushIfStocked(supplies, structure, SUPPLY_PRIORITY.salvage);
+      }
     }
   }
 
@@ -411,9 +463,88 @@ function pushIfHungry(
   entries.push({ id: structure.id, x: structure.pos.x, y: structure.pos.y, amount: missing, priority });
 }
 
+/** 低于 LOW 才挂表，缺口按补到 HIGH 算 */
+function pushContainerDemand(entries: LogisticsEntry[], structure: StructureContainer, priority: number): void {
+  const energy = structure.store[RESOURCE_ENERGY];
+  if (energy >= CONTAINER_REFILL_LOW) return;
+
+  const missing = Math.min(CONTAINER_REFILL_HIGH - energy, structure.store.getFreeCapacity(RESOURCE_ENERGY) ?? 0);
+  if (missing <= 0) return;
+
+  entries.push({ id: structure.id, x: structure.pos.x, y: structure.pos.y, amount: missing, priority });
+}
+
 function pushIfStocked(entries: LogisticsEntry[], holder: AnyStoreStructure | Tombstone | Ruin, priority: number): void {
   const available = holder.store[RESOURCE_ENERGY];
   if (available < MIN_PICKUP_AMOUNT) return;
 
   entries.push({ id: holder.id, x: holder.pos.x, y: holder.pos.y, amount: available, priority });
+}
+
+/**
+ * 已经认领的送货目标还收不收得下。
+ *
+ * 容器按 HIGH 判断：低于 LOW 才进表，但上路之后要允许一直补到 HIGH，
+ * 否则送到 500 就撒手，滞回形同虚设。
+ */
+function demandStillOpen(structure: AnyStoreStructure): boolean {
+  if (structure.structureType === STRUCTURE_CONTAINER) {
+    return structure.store[RESOURCE_ENERGY] < CONTAINER_REFILL_HIGH;
+  }
+
+  if (structure.structureType === STRUCTURE_TOWER) {
+    const cap = structure.store.getCapacity(RESOURCE_ENERGY);
+    if (!cap) return false;
+    return structure.store[RESOURCE_ENERGY] / cap < TOWER_REFILL_THRESHOLD;
+  }
+
+  return (structure.store.getFreeCapacity(RESOURCE_ENERGY) ?? 0) > 0;
+}
+
+/** 这个建筑在需求表里该是哪一档；不是我们该送的就返回 undefined */
+function demandPriorityOf(structure: AnyStoreStructure, room: Room): number | undefined {
+  if (structure.structureType === STRUCTURE_SPAWN || structure.structureType === STRUCTURE_EXTENSION) {
+    return DEMAND_PRIORITY.spawn;
+  }
+  if (structure.structureType === STRUCTURE_TOWER) return DEMAND_PRIORITY.tower;
+  if (structure.structureType === STRUCTURE_STORAGE) return DEMAND_PRIORITY.storage;
+
+  if (structure.structureType === STRUCTURE_CONTAINER) {
+    const spot = room.memory.upgradeSpot;
+    if (spot && structure.pos.x === spot.x && structure.pos.y === spot.y) {
+      return DEMAND_PRIORITY.controller;
+    }
+
+    const mining = Object.values(room.memory.miningSpots ?? {});
+    if (mining.some(s => s.x === structure.pos.x && s.y === structure.pos.y)) return undefined;
+    if (!isPlanned(room, STRUCTURE_CONTAINER, structure.pos.x, structure.pos.y)) return undefined;
+
+    return bufferDemandPriority(room.find(FIND_MY_CONSTRUCTION_SITES).length);
+  }
+
+  return undefined;
+}
+
+/** 已经认领的取货目标还有没有货（缓冲桶要看盈余） */
+function supplyStillOpen(target: LogisticsTarget, room: Room): boolean {
+  if (isDropped(target)) return target.amount >= MIN_PICKUP_AMOUNT;
+
+  if (isStoreContainer(target)) {
+    const spot = room.memory.upgradeSpot;
+    if (spot && target.pos.x === spot.x && target.pos.y === spot.y) return false;
+
+    const mining = Object.values(room.memory.miningSpots ?? {});
+    if (mining.some(s => s.x === target.pos.x && s.y === target.pos.y)) {
+      return target.store[RESOURCE_ENERGY] >= MIN_PICKUP_AMOUNT;
+    }
+
+    return target.store[RESOURCE_ENERGY] - CONTAINER_REFILL_LOW >= MIN_PICKUP_AMOUNT;
+  }
+
+  return target.store[RESOURCE_ENERGY] >= MIN_PICKUP_AMOUNT;
+}
+
+function isStoreContainer(target: LogisticsTarget): target is StructureContainer {
+  // 字面量：STRUCTURE_* 在测试加载阶段可能还是 any
+  return "structureType" in target && target.structureType === "container";
 }

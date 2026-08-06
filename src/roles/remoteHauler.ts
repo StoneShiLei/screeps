@@ -51,7 +51,7 @@ function collect(creep: Creep): void {
 
   if (commuteOrFlee(creep, roomName)) return;
 
-  const target = claimSupply(creep, logisticsOf(creep.room).supplies);
+  const target = claimSupply(creep, logisticsOf(creep.room, creep).supplies);
   if (!target) {
     // 空手等下一批比空手回家划算：来回一趟几十 tick，矿工每 tick 都在产出
     if (creep.store[RESOURCE_ENERGY] > 0) {
@@ -86,7 +86,7 @@ function deliver(creep: Creep): void {
     return;
   }
 
-  const target = claimDemand(creep, logisticsOf(home).demands);
+  const target = claimDemand(creep, logisticsOf(home, creep).demands);
   if (!target) {
     announce(creep, "无处卸");
     return;

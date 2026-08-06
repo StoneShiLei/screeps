@@ -156,7 +156,7 @@ export const COMMANDS: Record<string, Command> = {
   },
   "remote.add": {
     usage: "remote.add(target, room?)",
-    describe: "手动把某个房间加进外矿名单，被别人预定的也收",
+    describe: "手动把房间加进外矿名单（被别人预定的会去抢预定；被占领的加不了）",
     run: (target, roomName) => {
       if (!target) return "用法：remote.add(target, room?)";
 
@@ -165,16 +165,21 @@ export const COMMANDS: Record<string, Command> = {
 
       const memory = Memory.rooms[target];
       if (!memory?.scouted) return `${target} 还没侦察过，等 scout 去过再加`;
-      // 预定是唯一能人为推翻的一档：预定不阻止采矿，反而把源容量抬到 3000
-      if (memory.unusable && memory.unusable !== "reserved") return `${target} 不可用：${memory.unusable}`;
+      // reserved 放行去抢；owned / keeper / core / none 那种预定员搞不定的拒绝
+      if (memory.unusable && memory.unusable !== "reserved") {
+        return `${target} 采不了：${memory.unusable}`;
+      }
 
-      if ((room.memory.remotes ?? []).includes(target)) return `${target} 已经在名单里`;
+      const remotes = room.memory.remotes ?? [];
+      if (remotes.includes(target) && memory.home === room.name) {
+        return memory.unusable === "reserved" ? `${target} 已经在名单里（抢预定中）` : `${target} 已经在名单里`;
+      }
 
-      const shared = memory.unusable === "reserved";
-      enableRemote(room, target, shared);
-
-      const note = shared ? "（被别人预定着，只采矿不派预定员）" : "";
-      return `${room.name} 外矿名单 → ${(room.memory.remotes ?? []).join(" ")}${note}`;
+      enableRemote(room, target);
+      const list = (room.memory.remotes ?? []).join(" ");
+      return memory.unusable === "reserved"
+        ? `${room.name} 外矿名单 → ${list}（${target} 被别人预定，派预定员去抢）`
+        : `${room.name} 外矿名单 → ${list}`;
     }
   },
   "remote.drop": {
@@ -192,8 +197,6 @@ export const COMMANDS: Record<string, Command> = {
 
       remotes.splice(index, 1);
       delete Memory.rooms[target]?.home;
-      // 手动放行的标记跟着一起撤，否则下次自动挑选会把这个预定房又收回来
-      delete Memory.rooms[target]?.forced;
 
       // 认了这个房间的外派人员得放掉，否则它们会一直往一个不再采的房间跑
       for (const creep of Object.values(Game.creeps)) {
@@ -346,10 +349,15 @@ function remoteText(room: Room): string {
   for (const name of remotes) {
     const memory = Memory.rooms[name];
     const count = Object.keys(memory?.sources ?? {}).length;
-    const state = isRemotePaused(name) ? "遇袭冷却中" : "采集中";
+    const contesting = memory?.unusable === "reserved";
+    const state = isRemotePaused(name) ? "遇袭冷却中" : contesting ? "抢预定中" : "采集中";
     const left = reserveLeft(name);
     // 容量写出来是因为这直接决定了矿工体型和运输队人数
-    const reserve = left > 0 ? `已预定 剩 ${left} tick 源 3000 容量` : "未预定 源 1500 容量";
+    const reserve = contesting
+      ? "对方预定着，采不了"
+      : left > 0
+        ? `已预定 剩 ${left} tick 源 3000 容量`
+        : "未预定 源 1500 容量";
     lines.push(`  ${name} 源 ${count} 个 ${state} ${reserve}`);
 
     const breach = memory?.breach;
@@ -475,6 +483,7 @@ function isCreepRole(value: string): value is CreepRole {
     "miner",
     "hauler",
     "defender",
+    "guardian",
     "scout",
     "remoteMiner",
     "remoteHauler",

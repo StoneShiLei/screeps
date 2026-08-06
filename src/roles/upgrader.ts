@@ -9,7 +9,9 @@
  */
 
 import { gatherEnergy, refreshEnergyState } from "utils/energy";
+import { announce } from "../utils/logger";
 import { containerAt } from "../utils/structures";
+import { hasHaulers } from "../managers/logistics";
 import { holdPosition } from "../movement/traffic";
 import { travelTo } from "../movement/move";
 
@@ -19,7 +21,8 @@ import { travelTo } from "../movement/move";
  * 数量级来自搬运工的往返周期：从矿边到控制器一个来回大致就是这么久，
  * 短暂断货是正常波动，为此跑一趟矿区，回来的路上容器早又满了，两头耽误。
  * 但要是物流真断了（搬运工全死、矿工停工），死等就是白白耗掉一条命，
- * 所以得留这个出口。
+ * 所以得留这个出口——只在房间没有搬运工时启用。有 hauler 时出门也碰不了
+ * 矿边桶，来回几十 tick 纯亏，回来粮仓早又填上了。
  */
 const IDLE_TOLERANCE = 20;
 
@@ -52,6 +55,7 @@ export function runUpgrader(creep: Creep): void {
  * 容器空了多久，久到该出门了没有。
  *
  * 只要还能拿到能量就把计数清零，所以"断断续续有货"不会累积成放弃。
+ * 有搬运工时永远不放弃——出去也不许碰矿边桶，原地等粮仓回填更划算。
  */
 function hasGivenUp(creep: Creep, container: StructureContainer): boolean {
   const hasEnergy = container.store[RESOURCE_ENERGY] > 0 || creep.store[RESOURCE_ENERGY] > 0;
@@ -62,6 +66,12 @@ function hasGivenUp(creep: Creep, container: StructureContainer): boolean {
   }
 
   creep.memory.idleTicks = (creep.memory.idleTicks ?? 0) + 1;
+
+  if (hasHaulers(creep.room)) {
+    announce(creep, "等粮");
+    return false;
+  }
+
   return creep.memory.idleTicks > IDLE_TOLERANCE;
 }
 

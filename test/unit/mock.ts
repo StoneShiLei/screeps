@@ -77,6 +77,9 @@ const VALUE_CONSTANTS: Record<string, string | number> = {
   CARRY_CAPACITY: 50,
   LOOK_STRUCTURES: "structure",
   LOOK_CONSTRUCTION_SITES: "constructionSite",
+  // 地形掩码：外矿落点规划会读，数值照抄引擎
+  TERRAIN_MASK_WALL: 1,
+  TERRAIN_MASK_SWAMP: 2,
   // 返回码：角色代码靠它区分"够不着，走过去"和"已经办成了"
   OK: 0,
   ERR_NOT_IN_RANGE: -9,

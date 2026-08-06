@@ -10,7 +10,7 @@
  * 而两份状态迟早对不上。想看任务进度用 expand() / loot() / remote()。
  */
 
-import { enableRemote } from "./remote";
+import { REMOTE_MIN_LEVEL, enableRemote } from "./remote";
 import { log } from "../utils/logger";
 import { startExpansion } from "./expansion";
 import { startLoot } from "./loot";
@@ -21,6 +21,10 @@ interface FlagDirective {
   describe: string;
   /** 返回一行说明写进日志；返回 undefined 表示条件不满足、旗子留着下次再试 */
   apply: (home: Room, target: string) => string | undefined;
+  /**
+   * 怎么挑承接的房间。外矿必须找开得起外矿的家，不能让旁边 RCL1 分房把名单抢走。
+   */
+  pickHome?: (target: string) => Room | undefined;
 }
 
 const DIRECTIVES: FlagDirective[] = [
@@ -36,8 +40,9 @@ const DIRECTIVES: FlagDirective[] = [
   },
   {
     prefix: "remote",
-    describe: "把这个房间加进外矿名单",
-    apply: (home, target) => addRemote(home, target)
+    describe: "把这个房间加进外矿名单（被别人预定的会派预定员去抢；被占领的加不了）",
+    apply: (home, target) => addRemote(home, target),
+    pickHome: nearestRemoteHome
   }
 ];
 
@@ -54,7 +59,7 @@ export function runFlagDirectives(): void {
     const directive = DIRECTIVES.find(candidate => flag.name.toLowerCase().startsWith(candidate.prefix));
     if (!directive) continue;
 
-    const home = nearestHome(flag.pos.roomName);
+    const home = (directive.pickHome ?? nearestHome)(flag.pos.roomName);
     if (!home) {
       log.warn("旗子", `${flag.name} 在 ${flag.pos.roomName}，但附近没有己方房间能接这个活`);
       flag.remove();
@@ -76,11 +81,25 @@ export function runFlagDirectives(): void {
  * 只做一次，多算的那点精度换不来什么——真正远得该换人接的情况，直线距离也看得出来。
  */
 function nearestHome(target: string): Room | undefined {
+  return pickNearest(target, () => true);
+}
+
+/**
+ * 离目标最近、且开得起外矿的己方房间。
+ *
+ * E27S36 那种贴着新分房的外矿，若只按距离认领，会被 RCL1 的分房抢走名单——
+ * 分房自己造不出远程矿工，主家又看不见，表现为"插了旗开不起外矿"。
+ */
+function nearestRemoteHome(target: string): Room | undefined {
+  return pickNearest(target, room => (room.controller?.level ?? 0) >= REMOTE_MIN_LEVEL);
+}
+
+function pickNearest(target: string, accept: (room: Room) => boolean): Room | undefined {
   let best: Room | undefined;
   let bestDistance = Infinity;
 
   for (const room of Object.values(Game.rooms)) {
-    if (!room.controller?.my) continue;
+    if (!room.controller?.my || !accept(room)) continue;
 
     const distance = Game.map.getRoomLinearDistance(room.name, target);
     if (distance < bestDistance) {
@@ -95,22 +114,34 @@ function nearestHome(target: string): Room | undefined {
 /**
  * 手动加外矿。
  *
- * 和自动挑选的区别只有一条：被别人预定的房间照样收。插旗是明确的人为决定，
- * 而预定不阻止采矿——出口全被邻居占满时，那往往是唯一的候选。
+ * 和自动挑选的区别：越过评分，指定一个具体房间。被别人预定的也收——那是抢预定
+ * 的目标，预定员会去磨掉对方的预定再反手预定；被别人占领 / keeper / core / 没源
+ * 的仍拒绝，那种不是预定员能搞定的。
+ *
+ * 返回 undefined 表示条件还不成熟、旗子留着下次再试（比如还没侦察过）。
+ * 其他情况都返回说明文字并烧掉旗子——任务已经记进 Memory，旗子留着只会两套状态打架。
  */
-function addRemote(home: Room, target: string): string {
+function addRemote(home: Room, target: string): string | undefined {
   const memory = Memory.rooms[target];
-  if (!memory?.scouted) return `${target} 还没侦察过，等 scout 去过再插旗`;
-  if (memory.unusable && memory.unusable !== "reserved") return `${target} 不可用：${memory.unusable}`;
+  // 没侦察过就留着旗：scout 探完下一 tick 再兑现，别一把火把用户的意图烧了
+  if (!memory?.scouted) return undefined;
+  // reserved 放行：名单收下、派预定员去抢；其它 unusable 硬碰硬打不过
+  if (memory.unusable && memory.unusable !== "reserved") {
+    return `${target} 采不了：${memory.unusable}`;
+  }
 
   const remotes = home.memory.remotes ?? [];
-  if (remotes.includes(target)) return `${target} 已经在 ${home.name} 的外矿名单里`;
+  if (remotes.includes(target) && memory.home === home.name) {
+    return memory.unusable === "reserved"
+      ? `${target} 已经在 ${home.name} 的外矿名单里（抢预定中）`
+      : `${target} 已经在 ${home.name} 的外矿名单里`;
+  }
 
-  const shared = memory.unusable === "reserved";
-  enableRemote(home, target, shared);
-
-  const note = shared ? "（这房间被别人预定着，只采矿不派预定员）" : "";
-  return `${home.name} 外矿名单 → ${(home.memory.remotes ?? []).join(" ")}${note}`;
+  enableRemote(home, target);
+  const list = (home.memory.remotes ?? []).join(" ");
+  return memory.unusable === "reserved"
+    ? `${home.name} 外矿名单 → ${list}（${target} 被别人预定，派预定员去抢）`
+    : `${home.name} 外矿名单 → ${list}`;
 }
 
 /** 控制台的 flaghelp 用这张表生成说明，不手写第二份 */

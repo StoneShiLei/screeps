@@ -6,7 +6,14 @@
  * 容器里的能量是矿工现成挖好的，取一趟就满，比自己站着挖几十 tick 快得多。
  */
 
-import { SUPPLY_PRIORITY, claimSupply, feedingSpawn, isDropped, logisticsOf } from "../managers/logistics";
+import {
+  SUPPLY_PRIORITY,
+  claimSupply,
+  feedingSpawn,
+  hasHaulers,
+  isDropped,
+  logisticsOf
+} from "../managers/logistics";
 import { announce } from "./logger";
 import { travelTo } from "../movement/move";
 
@@ -29,21 +36,20 @@ export function refreshEnergyState(creep: Creep, workAction: string): void {
 /**
  * 去拿能量。
  *
- * yieldToSpawn 表示这个角色愿意让位：spawn 或 extension 还缺货时，它既不动矿边容器
- * （那是搬运工唯一的货源），也不去源边自己挖。
+ * yieldToHauler 表示这个角色愿意让位。触发条件是两条之一：spawn / extension
+ * 还缺货，或房间里有活着的搬运工。让位时既不动矿边容器，也不去源边自己挖。
  *
- * 让位必须把这两条一起管住，只挡容器是没用的：源的再生速度是固定的 10 能量/tick，
- * 矿工已经把这个量全吃下了，工人站过去自挖只是从矿工嘴里分走同一份能量，
- * 结果照样是矿边容器不进货、extension 填不上，只是换了个地方抢。
+ * 矿边容器是搬运工的收件箱。工人去认领只会按空余容量把供给从物流表里扣掉——
+ * 两个 builder 加三个 upgrader 一认领就是六百多，桶里明明有一百点，搬运工却报
+ * "无货源"。自挖同样得挡住：源的再生固定 10 能量/tick 且已被矿工吃满，工人
+ * 站过去只是从矿工嘴里分走同一份，还可能把源边那三格站位堵死。
  *
- * 停工的代价是有限的：搬运工一趟就能把 spawn 和 extension 填满，缺口通常几十 tick
- * 就没了，之后自动恢复。而 extension 空着的每一 tick，房间都孵不出下一个 creep。
- *
- * harvester 不让位——它只在搬运工断档时才存在，自己挖自己送正是它被造出来的理由。
+ * hauler 归零时自动恢复自取和自挖——那种时候没有别的办法。harvester 不让位，
+ * 它只在搬运工断档时才存在，自己挖自己送正是它被造出来的理由。
  */
-export function gatherEnergy(creep: Creep, yieldToSpawn = false): void {
-  const yielding = yieldToSpawn && feedingSpawn(creep.room);
-  const { supplies } = logisticsOf(creep.room);
+export function gatherEnergy(creep: Creep, yieldToHauler = false): void {
+  const yielding = yieldToHauler && (feedingSpawn(creep.room) || hasHaulers(creep.room));
+  const { supplies } = logisticsOf(creep.room, creep);
   const available = yielding ? supplies.filter(entry => entry.priority !== SUPPLY_PRIORITY.source) : supplies;
 
   const supply = claimSupply(creep, available);

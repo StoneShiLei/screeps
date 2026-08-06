@@ -12,6 +12,7 @@ type CreepRole =
   | "miner"
   | "hauler"
   | "defender"
+  | "guardian"
   | "scout"
   | "remoteMiner"
   | "remoteHauler"
@@ -173,17 +174,6 @@ interface RoomMemory {
    * core 是驻了 invader core，none 是压根没有能量源。
    */
   unusable?: "owned" | "reserved" | "keeper" | "core" | "none";
-  /**
-   * 手动指定的外矿，可以无视"被别人预定"这一条。
-   *
-   * 自动挑选永远绕开预定房，那是对的默认值——预定意味着邻居的 creep 就在那儿，
-   * 主动挤进去容易把经济摩擦升级成战争。但地形不由人选：出口全被占满的房间，
-   * 唯一的候选就是别人的外矿，那时候"绝不碰"等于永远没有外矿。
-   *
-   * 只放开 reserved 一档。owned / keeper / core / none 是物理上采不了或打不过，
-   * 不是政治判断，手动也不放行。
-   */
-  forced?: boolean;
   /** 上次在这里撞见敌人的 tick，用来给外派人员放一段冷却 */
   raided?: number;
   /**

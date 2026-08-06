@@ -101,6 +101,8 @@ const BUILD_PRIORITY: BuildableStructureConstant[] = [
   "tower",
   "extension",
   "storage",
+  /** 前期塔够用；rampart 又贵又掉血，太早盖是在和 extension 抢能量 */
+  "rampart",
   "container",
   "terminal",
   "link",
@@ -316,6 +318,12 @@ function expandPlan(room: Room): Set<string> {
     cells.add(cellKey(structure.type, anchor.x + structure.dx, anchor.y + structure.dy));
   }
 
+  // spawn / 塔上的 rampart 不进布局表，但算规划内——塔修建筑时靠这个认出自己人
+  for (const structure of BUNKER_STRUCTURES) {
+    if (structure.type !== "spawn" && structure.type !== "tower") continue;
+    cells.add(cellKey("rampart", anchor.x + structure.dx, anchor.y + structure.dy));
+  }
+
   // 房内主干道和外矿路线在这个房间里的路段，两份都算规划内
   for (const cell of [...decodeCells(room.memory.roads ?? ""), ...remoteRoadCells(room.name)]) {
     cells.add(cellKey("road", cell.x, cell.y));
@@ -484,7 +492,12 @@ function wantedSites(room: Room, anchor: Coord, level: number): PlannedSite[] {
     return bunkerSites(anchor, level).filter(site => site.type === "spawn");
   }
 
-  return [...outpostSites(room), ...bunkerSites(anchor, level), ...roadSites(room, level)];
+  return [
+    ...outpostSites(room),
+    ...bunkerSites(anchor, level),
+    ...defenseSites(room, anchor, level),
+    ...roadSites(room, level)
+  ];
 }
 
 function bunkerSites(anchor: Coord, level: number): PlannedSite[] {
@@ -496,6 +509,34 @@ function bunkerSites(anchor: Coord, level: number): PlannedSite[] {
     // 免得占着工地名额，把控制器旁边那个真正有用的容器一直挤在队尾
     priority: structure.type === "container" ? BUNKER_CONTAINER_PRIORITY : undefined
   }));
+}
+
+/**
+ * spawn 和塔上盖 rampart。
+ *
+ * RCL5 才开工：再早塔本身就能打掉多数骚扰，而 rampart 建造贵、还每 100 tick
+ * 掉 300 血，塔得持续砸能量养着——那笔钱前期更该进 extension 和升级。
+ * 5 级有第二座塔、收入也宽裕了，再给关键建筑加皮。
+ *
+ * 底下那栋还没立起来就别拍：同一格同时只能有一个工地，会把 spawn / 塔挤掉。
+ */
+function defenseSites(room: Room, anchor: Coord, level: number): PlannedSite[] {
+  if (level < 5) return [];
+
+  const sites: PlannedSite[] = [];
+
+  for (const structure of BUNKER_STRUCTURES) {
+    if (structure.type !== "spawn" && structure.type !== "tower") continue;
+    if (unlockLevel(structure) > level) continue;
+
+    const x = anchor.x + structure.dx;
+    const y = anchor.y + structure.dy;
+    if (!isBuilt(room, { x, y, type: structure.type })) continue;
+
+    sites.push({ x, y, type: "rampart" });
+  }
+
+  return sites;
 }
 
 /**
@@ -649,5 +690,6 @@ function isBuilt(room: Room, site: PlannedSite): boolean {
 
 function siteAt(room: Room, site: PlannedSite): ConstructionSite | undefined {
   const position = room.getPositionAt(site.x, site.y);
-  return position?.lookFor(LOOK_CONSTRUCTION_SITES)[0];
+  // 同一格可能先有别的东西（极少见）；rampart 必须对上类型，不能被别的工地挡住重拍
+  return position?.lookFor(LOOK_CONSTRUCTION_SITES).find(candidate => candidate.structureType === site.type);
 }

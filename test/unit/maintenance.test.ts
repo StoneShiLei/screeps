@@ -37,6 +37,14 @@ describe("规划内的建筑", () => {
     assert.isTrue(isPlanned(room, "spawn", anchor.x + FIRST_SPAWN_OFFSET.dx, anchor.y + FIRST_SPAWN_OFFSET.dy));
   });
 
+  it("spawn 和塔上的 rampart 算规划内，塔才认得要修", () => {
+    const room = planned({ anchor });
+
+    assert.isTrue(isPlanned(room, "rampart", anchor.x + FIRST_SPAWN_OFFSET.dx, anchor.y + FIRST_SPAWN_OFFSET.dy));
+    // 锚点本身不是 spawn/塔格，上面不该有 rampart
+    assert.isFalse(isPlanned(room, "rampart", anchor.x, anchor.y));
+  });
+
   it("位置对但类型不对不算", () => {
     const room = planned({ anchor });
 
@@ -162,7 +170,17 @@ describe("旗子指令", () => {
       controller: { my: true, level },
       energyCapacityAvailable: 1300,
       memory: { anchor: { x: 25, y: 25 } },
-      find: () => []
+      find: () => [],
+      // enableRemote 规划路线时会问入口格子的位置
+      getPositionAt: (x: number, y: number) => new FakePosition(x, y, name)
+    };
+  }
+
+  function stubPlanning(game: { map: Record<string, unknown> }): void {
+    game.map.findExit = () => 1;
+    game.map.getRoomTerrain = () => ({ get: () => 0 });
+    (global as unknown as { PathFinder: unknown }).PathFinder = {
+      search: () => ({ path: [], incomplete: true })
     };
   }
 
@@ -179,8 +197,15 @@ describe("旗子指令", () => {
       rooms: { W1N1: ownedRoom("W1N1"), W9N9: ownedRoom("W9N9") },
       time: 500,
       gcl: { level: 8 },
-      // W1N1 挨着 W1N2，W9N9 离得远
-      map: { getRoomLinearDistance: (from: string, to: string) => (from === "W1N1" && to === "W1N2" ? 1 : 9) }
+      // W1N1 挨着 W1N2，W9N9 离得远；分房 W1N0 更近但默认不放进 rooms
+      map: {
+        getRoomLinearDistance: (from: string, to: string) => {
+          if (to !== "W1N2") return 9;
+          if (from === "W1N0") return 1;
+          if (from === "W1N1") return 2;
+          return 9;
+        }
+      }
     };
     context.Memory = { settings: { level: "error" }, rooms: {} };
   });
@@ -222,6 +247,98 @@ describe("旗子指令", () => {
     const text = flagHelpText();
 
     for (const prefix of ["claim", "loot", "remote", "plan"]) assert.include(text, prefix);
+  });
+
+  it("remote 旗插在还没侦察过的房间上先留着，别一把火烧掉用户意图", () => {
+    const game = (global as unknown as { Game: { flags: Record<string, unknown> } }).Game;
+    game.flags.remote1 = flag("remote1", "W1N2");
+
+    runFlagDirectives();
+
+    assert.isEmpty(removed, "scout 还没去过，旗子留下一 tick 再兑现");
+    assert.isUndefined(Game.rooms.W1N1.memory.remotes);
+  });
+
+  it("remote 旗指到被别人预定的房间就收下：派预定员去抢，不派矿工", () => {
+    Memory.rooms.W1N2 = {
+      scouted: 1,
+      unusable: "reserved",
+      sources: { s1: { x: 10, y: 10 } }
+    } as RoomMemory;
+
+    const game = (global as unknown as {
+      Game: { flags: Record<string, unknown>; map: Record<string, unknown> };
+    }).Game;
+    game.flags.remoteShared = flag("remoteShared", "W1N2");
+    stubPlanning(game);
+
+    runFlagDirectives();
+
+    assert.deepEqual(removed, ["remoteShared"], "任务记进名单后旗子烧掉");
+    assert.include(Game.rooms.W1N1.memory.remotes ?? [], "W1N2", "收下好派预定员去 attackController");
+    assert.equal(Memory.rooms.W1N2.home, "W1N1");
+  });
+
+  it("remote 旗指到别人占领的房间才拒绝：那不是预定员能搞定的", () => {
+    Memory.rooms.W1N2 = {
+      scouted: 1,
+      unusable: "owned",
+      sources: { s1: { x: 10, y: 10 } }
+    } as RoomMemory;
+
+    const game = (global as unknown as {
+      Game: { flags: Record<string, unknown>; map: Record<string, unknown> };
+    }).Game;
+    game.flags.remoteOwned = flag("remoteOwned", "W1N2");
+    stubPlanning(game);
+
+    runFlagDirectives();
+
+    assert.deepEqual(removed, ["remoteOwned"], "给出拒绝说明后旗子烧掉");
+    assert.notInclude(Game.rooms.W1N1.memory.remotes ?? [], "W1N2");
+  });
+
+  it("remote 旗不让旁边的弱分房抢走，交给开得起外矿的家", () => {
+    // E27S36 贴着新分房时，只按距离会让 RCL1 接旗——分房造不出远程矿工，主家又没名单
+    Game.rooms.W1N0 = ownedRoom("W1N0", 1) as Room;
+    Memory.rooms.W1N2 = {
+      scouted: 1,
+      sources: { s1: { x: 10, y: 10 } }
+    } as RoomMemory;
+
+    const game = (global as unknown as {
+      Game: { flags: Record<string, unknown>; map: Record<string, unknown> };
+    }).Game;
+    game.flags.remote1 = flag("remote1", "W1N2");
+    stubPlanning(game);
+
+    runFlagDirectives();
+
+    assert.include(Game.rooms.W1N1.memory.remotes ?? [], "W1N2", "RCL4 的主家承接");
+    assert.isUndefined(Game.rooms.W1N0.memory.remotes, "RCL1 分房不能开外矿");
+    assert.equal(Memory.rooms.W1N2.home, "W1N1");
+  });
+
+  it("remote 旗从弱房名单迁到能开外矿的家", () => {
+    Game.rooms.W1N0 = ownedRoom("W1N0", 1) as Room;
+    Game.rooms.W1N0.memory.remotes = ["W1N2"];
+    Memory.rooms.W1N2 = {
+      scouted: 1,
+      sources: { s1: { x: 10, y: 10 } },
+      home: "W1N0"
+    } as RoomMemory;
+
+    const game = (global as unknown as {
+      Game: { flags: Record<string, unknown>; map: Record<string, unknown> };
+    }).Game;
+    game.flags.remote1 = flag("remote1", "W1N2");
+    stubPlanning(game);
+
+    runFlagDirectives();
+
+    assert.include(Game.rooms.W1N1.memory.remotes ?? [], "W1N2");
+    assert.notInclude(Game.rooms.W1N0.memory.remotes ?? [], "W1N2", "弱房名单里摘掉，避免两家抢");
+    assert.equal(Memory.rooms.W1N2.home, "W1N1");
   });
 });
 

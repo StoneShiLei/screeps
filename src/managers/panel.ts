@@ -379,6 +379,7 @@ function shortRole(role: CreepRole): string {
     builder: "建",
     upgrader: "升",
     defender: "卫",
+    guardian: "援",
     scout: "探",
     remoteMiner: "外矿",
     remoteHauler: "外运",

@@ -132,7 +132,7 @@ function deliver(creep: Creep): void {
     return;
   }
 
-  const target = claimDemand(creep, logisticsOf(home).demands);
+  const target = claimDemand(creep, logisticsOf(home, creep).demands);
   if (!target) {
     // 家里暂时没地方收。站在 spawn 边上等，别跑回去白跑一趟
     announce(creep, "满仓");

@@ -17,11 +17,11 @@ import {
 } from "./remote";
 import { SUPPLY_PRIORITY, logisticsOf } from "./logistics";
 import { claimerQuota, colonyDefenders, expansionAssignment, pioneerQuota } from "./expansion";
+import { hostilesIn, localDefenderCount } from "../roles/defender";
 import { lootAssignment, looterQuota } from "./loot";
 import { blockedByIntruders } from "./demolish";
 import { bodyFor } from "../utils/body";
 import { containerAt } from "../utils/structures";
-import { hostilesIn } from "../roles/defender";
 import { isVisualOn } from "../utils/settings";
 import { log } from "../utils/logger";
 import { reliefSlots } from "./relief";
@@ -93,6 +93,8 @@ function quotaFor(room: Room, counts: Record<CreepRole, number>): Record<CreepRo
 
   return {
     defender: defenderQuota(room),
+    // 远程协防：独立兵种、独立预算，老家有余裕时才去替弱小分房扛一阵
+    guardian: guardianQuota(room, counts),
     // 接班名额：矿工走到矿边要几十 tick（5 个 WORK 配 1 个 MOVE，平地五 tick 一格），
     // 等它死了才开始孵化，那一整段是纯停产
     miner: sources + reliefSlots(room, "miner"),
@@ -123,7 +125,11 @@ function quotaFor(room: Room, counts: Record<CreepRole, number>): Record<CreepRo
 }
 
 /**
- * 有几个敌人就派几个兵，没敌人就一个不养。
+ * 本土早期防御兵的配额，只管自己房间，跨房驰援是 guardian 的事。
+ *
+ * 只打系统入侵者，且按战力折算派几个：对方常是一堆小 creep，一个满编兵抵得过
+ * 好几个，照人头派会造一堆闲兵。场上有敌对玩家时直接归零——地面兵打不过玩家，
+ * 硬孵只会把重启产线的能量喂掉，把自己拖进死循环，那种仗交给塔和 rampart。
  *
  * 入侵者要等房间累计采满十万能量才刷一次，中间隔着好几万 tick。养一支常备军
  * 意味着每 1500 tick 全额重造一遍，这笔钱拿去造 extension 早就回本了。
@@ -132,18 +138,27 @@ function quotaFor(room: Room, counts: Record<CreepRole, number>): Record<CreepRo
  * 让本该继续运转的生产线也停了。
  */
 function defenderQuota(room: Room): number {
-  return localDefenders(room) + (colonyDefenders(room)?.count ?? 0);
-}
-
-/** 本土要留几个兵 */
-function localDefenders(room: Room): number {
-  const armed = hostilesIn(room).length;
-  if (armed > 0) return Math.min(armed, MAX_DEFENDERS);
+  const count = localDefenderCount(hostilesIn(room), room.energyCapacityAvailable, MAX_DEFENDERS);
+  if (count > 0) return count;
 
   // 没有武装敌人，但有赖着不走的外人堵住了拆迁：destroy 见到任何敌对 creep
   // 就拒绝，而对方失去归属之后往往就地停摆，站着等老死能占一千五百 tick。
   // 派一个兵去清场比等便宜得多——它们是矿工和运输队，一个攻击部件都没有
   return blockedByIntruders(room) ? 1 : 0;
+}
+
+/**
+ * 远程协防兵的配额：老家有余裕时替弱小分房扛一阵。
+ *
+ * 和早期防御兵彻底分开：这是"帮别人"，前提是自己先站得稳。老家自身产线断了、
+ * 或者本土正在挨打，一律不外派——先把自己的火扑了。满足前提之后，派几个、派去
+ * 哪，交给 colonyDefenders 按分房的敌情算。
+ */
+function guardianQuota(room: Room, counts: Record<CreepRole, number>): number {
+  if (isChainBroken(counts)) return 0;
+  if (hostilesIn(room).length > 0) return 0;
+
+  return colonyDefenders(room)?.count ?? 0;
 }
 
 /**
@@ -263,6 +278,10 @@ export const SPAWN_PRIORITY: CreepRole[] = [
   "harvester",
   "miner",
   "hauler",
+  // 协防兵排在本土产线三件套之后：老家先保住自己的挖—运—孵化闭环，再谈驰援。
+  // 它的配额本身已经卡了"老家没断链、本土没挨打"两道闸，能亮起来就说明家里有
+  // 余裕，这时候一个分房正等着救，比继续攒外矿和升级都急
+  "guardian",
   // 占领者插在这么前面，是因为它便宜得离谱而效果不可逆：700 能量、21 tick 孵化，
   // 换来一个永久归属的房间。而"还没占下"这个状态是会被别人终结的——预定只能靠
   // 一个 600 tick 寿命的 CLAIM 顶着，那期间隔壁随时可以自己占了它。
@@ -304,10 +323,37 @@ export function runSpawnManager(room: Room): void {
 
   const counts = countByRole(room);
   const quota = quotaFor(room, counts);
-  const role = SPAWN_PRIORITY.find(candidate => counts[candidate] < quota[candidate]);
+  const broken = isChainBroken(counts);
+
+  const role = pickSpawn(counts, quota, broken);
   if (!role) return;
 
-  spawnCreep(idleSpawn, role, isChainBroken(counts));
+  // 战斗兵绝不用应急小体型：一个凑合出来的小兵照样打不过，只是把重启产线的
+  // 能量喂掉。断链时该抢救的是自给自足的 harvester，不是往火里填注定要死的兵
+  spawnCreep(idleSpawn, role, broken && !isCombat(role));
+}
+
+/** 战斗兵种：本土防御和远程协防，孵化时不走应急路线 */
+function isCombat(role: CreepRole): boolean {
+  return role === "defender" || role === "guardian";
+}
+
+/**
+ * 挑这一 tick 该孵谁。
+ *
+ * 常态就是照 SPAWN_PRIORITY 找第一个缺口。唯一的例外是断链：那时哪怕正挨着打，
+ * 也要先把 harvester 抢救回来重启产线，而不是被排在最前的 defender 抢走那点仅剩
+ * 的能量——它反正也造不出打得赢的兵，只会让房间一直卡在"孵化不出来"里空转，
+ * 这正是 E28S35 死循环的另一半成因。
+ */
+function pickSpawn(
+  counts: Record<CreepRole, number>,
+  quota: Record<CreepRole, number>,
+  broken: boolean
+): CreepRole | undefined {
+  if (broken && counts.harvester < quota.harvester) return "harvester";
+
+  return SPAWN_PRIORITY.find(candidate => counts[candidate] < quota[candidate]);
 }
 
 /**
@@ -371,22 +417,13 @@ function assignmentFor(room: Room, role: CreepRole): Partial<CreepMemory> {
   if (role === "claimer" || role === "pioneer") return expansionAssignment(room);
   if (role === "looter") return lootAssignment(room);
 
-  // 本土的名额先填满，多出来的那几个才远征。数已经在路上的人来分辨该派谁，
-  // 免得三个兵全留在家里而分房那边一个都没到
-  if (role === "defender") {
+  // 协防兵在孵化那一刻就认下要去的分房；早期防御兵永远留在本土，不带 targetRoom
+  if (role === "guardian") {
     const relief = colonyDefenders(room);
-    if (relief && defendersSentTo(room, relief.target) < relief.count) return { targetRoom: relief.target };
+    return relief ? { targetRoom: relief.target } : {};
   }
 
   return {};
-}
-
-/** 已经派往这个分房的兵有几个（含还在路上的） */
-function defendersSentTo(home: Room, target: string): number {
-  return Object.values(Game.creeps).filter(
-    creep =>
-      creep.memory.role === "defender" && creep.memory.room === home.name && creep.memory.targetRoom === target
-  ).length;
 }
 
 /**
@@ -415,6 +452,7 @@ function countByRole(room: Room): Record<CreepRole, number> {
     miner: 0,
     hauler: 0,
     defender: 0,
+    guardian: 0,
     scout: 0,
     remoteMiner: 0,
     remoteHauler: 0,

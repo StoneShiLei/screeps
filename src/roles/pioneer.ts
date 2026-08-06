@@ -14,6 +14,7 @@
  * 本地 creep 的体型。
  */
 
+import { DEMAND_PRIORITY, claimDemand, logisticsOf } from "../managers/logistics";
 import { announce, log } from "../utils/logger";
 import { commuteTo, travelTo } from "../movement/move";
 import { wornContainer, wornRoad } from "../planner/remoteRoads";
@@ -50,12 +51,16 @@ export function runPioneer(creep: Creep): void {
 }
 
 /**
- * 有工地就建，没有就升级控制器。
+ * 先给 spawn 和 extension 补能量，再建造，没有工地就升级控制器。
  *
- * spawn 永远排第一。新房间在 spawn 建成之前是完全不能自理的，其余任何建筑
- * 都得等——一个建好的 extension 在没有 spawn 的房间里毫无意义。
+ * 新房间刚立起 spawn 时最容易卡死：spawn 里只有几十点能量，每 tick 自恢复 1 点，
+ * 爬到 300 才能孵第一个人——而八格外往往就躺着前人的 terminal。拓荒者带 CARRY，
+ * 取货逻辑本来就会从那些仓库拿，送出去却没人写，等于捧着货站在空 spawn 旁边盖
+ * 容器。补孵化能量永远比多盖一栋 extension 急。
  */
 function work(creep: Creep): void {
+  if (creep.room.controller?.my && feedSpawn(creep)) return;
+
   const site = pickSite(creep);
   if (site) {
     if (creep.build(site) === ERR_NOT_IN_RANGE) {
@@ -87,6 +92,22 @@ function work(creep: Creep): void {
   if (creep.upgradeController(controller) === ERR_NOT_IN_RANGE) {
     travelTo(creep, controller, { range: 3, visualizePathStyle: { stroke: "#88ff88" } });
   }
+}
+
+/** 把能量送进 spawn / extension。有缺口就返回 true，调用方别再干别的 */
+function feedSpawn(creep: Creep): boolean {
+  const hungry = logisticsOf(creep.room, creep).demands.filter(entry => entry.priority <= DEMAND_PRIORITY.spawn);
+  const target = claimDemand(creep, hungry);
+  if (!target) return false;
+
+  announce(creep, "填孵");
+  if (creep.transfer(target, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) {
+    travelTo(creep, target, { visualizePathStyle: { stroke: "#ffffff" } });
+  } else {
+    delete creep.memory.deliverTo;
+  }
+
+  return true;
 }
 
 function pickSite(creep: Creep): ConstructionSite | null {
