@@ -5,7 +5,7 @@
  * 建好之后不写这段代码，它就只是个漂亮的摆设。
  */
 
-import { hostilesIn } from "../roles/defender";
+import { hostilesIn, intrudersIn } from "../roles/defender";
 
 /**
  * 修理的能量下限。
@@ -35,6 +35,15 @@ const REPAIR_INTERVAL = 10;
  */
 const SKIP_REPAIR: StructureConstant[] = ["constructedWall", "rampart"];
 
+/**
+ * 手无寸铁的邻居进到这个距离以内才开火。
+ *
+ * 它们伤不了我们，打不打是笔纯经济账：一炮 10 能量，10 格上还有 450 伤害，
+ * 两炮就能报销一个 300 能量的矿工，很划算。但 20 格外只剩 150 伤害，那种
+ * 距离多半是贴着边界路过，追着打就是拿自己的能量换对方的通行费。
+ */
+const SNIPE_RANGE = 10;
+
 export type TowerAction =
   | { kind: "attack"; target: Creep }
   | { kind: "heal"; target: Creep }
@@ -48,12 +57,15 @@ export function runTowers(room: Room): void {
   if (towers.length === 0) return;
 
   const hostiles = hostilesIn(room);
+  // 抢矿的邻居也在名单里，只是排在武装敌人后面、而且只打近处的
+  const intruders = intrudersIn(room).filter(creep => !hostiles.includes(creep));
   const wounded = room.find(FIND_MY_CREEPS, { filter: creep => creep.hits < creep.hitsMax });
-  const damaged = idle(hostiles, wounded) && Game.time % REPAIR_INTERVAL === 0 ? repairTargets(room) : [];
+  const busy = hostiles.length > 0 || intruders.length > 0 || wounded.length > 0;
+  const damaged = !busy && Game.time % REPAIR_INTERVAL === 0 ? repairTargets(room) : [];
 
   for (const tower of towers) {
     const energy = tower.store.getUsedCapacity(RESOURCE_ENERGY);
-    const action = chooseTowerAction({ pos: tower.pos, energy }, { hostiles, wounded, damaged });
+    const action = chooseTowerAction({ pos: tower.pos, energy }, { hostiles, intruders, wounded, damaged });
 
     switch (action.kind) {
       case "attack":
@@ -81,13 +93,17 @@ export function runTowers(room: Room): void {
  */
 export function chooseTowerAction(
   tower: { pos: RoomPosition; energy: number },
-  targets: { hostiles: Creep[]; wounded: Creep[]; damaged: Structure[] }
+  targets: { hostiles: Creep[]; intruders?: Creep[]; wounded: Creep[]; damaged: Structure[] }
 ): TowerAction {
   // 塔伤害随距离衰减，5 格内满伤 600，20 格外只剩 150，所以永远打最近的。
   // 基地里几座塔挨得很近，各自选最近的结果基本就是集火——这正是想要的，
   // 敌方带治疗时把伤害分散到两个目标上，等于一个都打不死。
   const hostile = nearest(tower.pos, targets.hostiles);
   if (hostile) return { kind: "attack", target: hostile };
+
+  // 武装敌人清完了才轮到抢矿的，而且得在划得来的距离上
+  const intruder = nearest(tower.pos, targets.intruders ?? []);
+  if (intruder && tower.pos.getRangeTo(intruder.pos) <= SNIPE_RANGE) return { kind: "attack", target: intruder };
 
   const patient = nearest(tower.pos, targets.wounded);
   if (patient) return { kind: "heal", target: patient };
@@ -96,10 +112,6 @@ export function chooseTowerAction(
 
   const broken = weakest(targets.damaged);
   return broken ? { kind: "repair", target: broken } : { kind: "idle" };
-}
-
-function idle(hostiles: Creep[], wounded: Creep[]): boolean {
-  return hostiles.length === 0 && wounded.length === 0;
 }
 
 function nearest<T extends { pos: RoomPosition }>(from: RoomPosition, candidates: T[]): T | undefined {

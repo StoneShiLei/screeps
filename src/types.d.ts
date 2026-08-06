@@ -16,7 +16,10 @@ type CreepRole =
   | "remoteMiner"
   | "remoteHauler"
   | "reserver"
-  | "dismantler";
+  | "dismantler"
+  | "claimer"
+  | "pioneer"
+  | "looter";
 
 interface CreepMemory {
   role: CreepRole;
@@ -124,6 +127,29 @@ interface RoomMemory {
   remotes?: string[];
   /** 外矿房间归哪个基地管。这个字段也是 Memory 清理时的白名单标记 */
   home?: string;
+  /**
+   * 正在开的分房。只有出资的老家有这个字段。
+   *
+   * 只存目标和起始 tick，进度不存：占没占下、spawn 建没建好、新房能不能自理，
+   * 全都能从游戏状态直接看出来。存一份状态机就要操心它和现实不同步的那些情形，
+   * 而现实随时会变——被人抢了、spawn 被拆了、房间掉级，都不需要额外处理。
+   */
+  expansion?: { target: string; since: number };
+  /**
+   * 上次有视野、且没看见武装敌人的 tick。
+   *
+   * 和 raided 配对使用：cleared 落后于 raided 就说明"知道那里有过敌人，之后
+   * 没人再去看过"，这种房间只派侦察兵，不派整套人马。
+   */
+  cleared?: number;
+  /** 正在搬哪个无主房间的存货。只有出人的老家有这个字段 */
+  loot?: string;
+  /**
+   * 上次有视野时数出来的可搬存量。
+   *
+   * 配额要在家里算，而那时候多半看不见目标房间——没有这个数就只能瞎派人。
+   */
+  lootLeft?: number;
   /**
    * 侦察到的能量源位置，键是 source id。
    *

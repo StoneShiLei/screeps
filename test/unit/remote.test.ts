@@ -2,10 +2,12 @@ import { assert } from "chai";
 import { bodyCost, bodyFor } from "../../src/utils/body";
 import { cleanupRoomMemory } from "../../src/utils/memory";
 import {
+  activeRemoteSources,
   breachBudgetFor,
   breachTargets,
   dismantlerQuota,
   haulersForRemote,
+  nextScoutTarget,
   reserveTargets,
   reserverQuota,
   unassignedBreachTarget,
@@ -278,6 +280,72 @@ describe("被墙封住的外矿", () => {
   });
 });
 
+describe("遇袭之后的复工", () => {
+  const home = {
+    name: "W1N1",
+    controller: { level: 3 },
+    energyCapacityAvailable: 800,
+    memory: { remotes: ["W1N2"], anchor: { x: 25, y: 25 } }
+  } as unknown as Room;
+
+  const RAID_COOLDOWN = 1500;
+
+  function remoteRoom(extra: Partial<RoomMemory> = {}): RoomMemory {
+    return { sources: { s1: { x: 10, y: 10 } }, scouted: 1, ...extra } as RoomMemory;
+  }
+
+  let saved: { Game: unknown; Memory: unknown };
+  let tick = 50_000;
+
+  beforeEach(() => {
+    const context = global as unknown as typeof saved;
+    saved = { Game: context.Game, Memory: context.Memory };
+
+    // 换 tick：外矿名单按 tick 缓存，同一 tick 问第二遍拿的是上个用例的账
+    context.Game = { creeps: {}, time: (tick += 10), map: { describeExits: () => ({}) } };
+    context.Memory = { rooms: { W1N2: remoteRoom() } };
+  });
+
+  afterEach(() => {
+    Object.assign(global, saved);
+  });
+
+  it("没遇袭过的房间照常采", () => {
+    assert.lengthOf(activeRemoteSources(home), 1);
+  });
+
+  it("冷却期内不派人", () => {
+    Memory.rooms.W1N2 = remoteRoom({ raided: Game.time - 100 });
+
+    assert.isEmpty(activeRemoteSources(home));
+  });
+
+  it("冷却结束但还没人去看过，只派侦察兵不派整套人马", () => {
+    Memory.rooms.W1N2 = remoteRoom({ raided: Game.time - RAID_COOLDOWN - 1 });
+
+    // 冷却到点只意味着"入侵者按理该过期了"，不意味着房间空了。直接补齐矿工和
+    // 运输队的话，它们要走几十格才发现敌人还在，然后转头就跑——上千能量的
+    // 孵化费和几百 tick 的寿命白扔，冷却还会被重新触发，可以无限循环
+    assert.isEmpty(activeRemoteSources(home), "没确认过就不派贵的");
+    assert.equal(nextScoutTarget(home), "W1N2", "先花 50 能量让一个 MOVE 去看一眼");
+  });
+
+  it("有人去看过、确认清场之后就全员复工", () => {
+    const raided = Game.time - RAID_COOLDOWN - 1;
+    Memory.rooms.W1N2 = remoteRoom({ raided, cleared: raided + 10 });
+
+    assert.lengthOf(activeRemoteSources(home), 1);
+    assert.isUndefined(nextScoutTarget(home), "已经确认过了，不用再跑一趟");
+  });
+
+  it("确认的时间早于遇袭就不算确认", () => {
+    const raided = Game.time - RAID_COOLDOWN - 1;
+    Memory.rooms.W1N2 = remoteRoom({ raided, cleared: raided - 500 });
+
+    assert.isEmpty(activeRemoteSources(home), "那是上次遇袭之前的旧结论");
+  });
+});
+
 describe("拆迁工体型", () => {
   it("两个 WORK 配一个 MOVE，平地上一格一 tick", () => {
     const body = bodyFor("dismantler", 800);
@@ -352,7 +420,11 @@ describe("侦察兵退役", () => {
     const context = global as unknown as typeof saved;
     saved = { Game: context.Game, Memory: context.Memory, RoomPosition: context.RoomPosition, PathFinder: context.PathFinder };
 
-    context.Game = { rooms: { W1N1: { name: "W1N1" } }, map: { describeExits: () => ({ "1": "W1N2", "7": "W2N1" }) }, time: 1000 };
+    context.Game = {
+      rooms: { W1N1: { name: "W1N1", memory: {} } },
+      map: { describeExits: () => ({ "1": "W1N2", "7": "W2N1" }) },
+      time: 1000
+    };
     // 级别定成 error，退役那行 info 日志就不会混进测试输出
     context.Memory = { settings: { level: "error" }, rooms: {} };
     context.RoomPosition = FakePosition;

@@ -20,9 +20,11 @@ import {
   setVisual,
   settings
 } from "../utils/settings";
+import { cancelExpansion, expansionStatus, startExpansion } from "../managers/expansion";
 import { cleanupCreepMemory, cleanupRoomMemory } from "../utils/memory";
 import { isRemotePaused, reserveLeft } from "../managers/remote";
 import { loadByRole, spawnLoadOf } from "../managers/spawnLoad";
+import { lootPiles, lootStatus, startLoot, stopLoot } from "../managers/loot";
 import { logisticsOf } from "../managers/logistics";
 import { planRoom } from "../planner/roomPlanner";
 import { roomPopulation } from "../managers/spawnManager";
@@ -207,6 +209,70 @@ export const COMMANDS: Record<string, Command> = {
       return `已清 ${cleared} 个房间的侦察记录`;
     }
   },
+  expand: {
+    usage: "expand(target, room?)",
+    describe: "开分房：占领 target 并派拓荒者把第一个 spawn 建起来",
+    run: (target, roomName) => {
+      // 查进度时认得出是哪个房间在开分房；要新开一个就得写明由谁出资
+      const room = target ? resolveRoom(roomName) : resolveDirective(roomName, each => !!each.memory.expansion);
+      if (typeof room === "string") return room;
+      if (!target) return expansionStatus(room) ?? `${room.name} 没在开分房，用法：expand(target)`;
+
+      return startExpansion(room, target);
+    }
+  },
+  "expand.cancel": {
+    usage: "expand.cancel(room?)",
+    describe: "取消开分房，已派出的人转回本土",
+    run: roomName => {
+      const room = resolveDirective(roomName, each => !!each.memory.expansion);
+      if (typeof room === "string") return room;
+      return cancelExpansion(room);
+    }
+  },
+  loot: {
+    usage: "loot(target, room?)",
+    describe: "搬空无主房间里前人留下的仓库；不写 target 就看进度",
+    run: (target, roomName) => {
+      const room = target ? resolveRoom(roomName) : resolveDirective(roomName, each => !!each.memory.loot);
+      if (typeof room === "string") return room;
+      if (!target) return lootStatus(room) ?? `${room.name} 没在搬东西，用法：loot(target)`;
+
+      return startLoot(room, target);
+    }
+  },
+  "loot.stop": {
+    usage: "loot.stop(room?)",
+    describe: "停止搬运",
+    run: roomName => {
+      const room = resolveDirective(roomName, each => !!each.memory.loot);
+      if (typeof room === "string") return room;
+      return stopLoot(room);
+    }
+  },
+  "loot.scan": {
+    usage: "loot.scan(target)",
+    describe: "列出某个房间里能搬走的建筑和存量（需要有视野）",
+    run: target => {
+      const room = Game.rooms[target];
+      if (!room) return `${target} 现在没有视野，等有人过去再看`;
+
+      const piles = lootPiles(room);
+      if (piles.length === 0) return `${target} 没有可搬的东西`;
+
+      const lines = piles.map(pile => {
+        const { structure } = pile;
+        const contents = (Object.keys(structure.store) as ResourceConstant[])
+          .filter(type => structure.store[type] > 0)
+          .map(type => `${type} ${structure.store[type]}`)
+          .join("，");
+        return `  ${structure.structureType.padEnd(12)} (${structure.pos.x},${structure.pos.y})`.padEnd(28) + contents;
+      });
+
+      const total = piles.reduce((sum, pile) => sum + pile.amount, 0);
+      return [`${target} 可搬 ${total}`, ...lines].join("\n");
+    }
+  },
   logistics: {
     usage: "logistics(room?)",
     describe: "打印供需快照",
@@ -338,6 +404,15 @@ export function installCommands(): void {
   remote.drop = (target: string, room?: string) => COMMANDS["remote.drop"].run(target, room ?? "");
   g.remote = remote;
   g.rescout = (target?: string) => COMMANDS.rescout.run(target ?? "");
+
+  const expand = (target?: string, room?: string) => COMMANDS.expand.run(target ?? "", room ?? "");
+  expand.cancel = (room?: string) => COMMANDS["expand.cancel"].run(room ?? "");
+  g.expand = expand;
+
+  const loot = (target?: string, room?: string) => COMMANDS.loot.run(target ?? "", room ?? "");
+  loot.stop = (room?: string) => COMMANDS["loot.stop"].run(room ?? "");
+  loot.scan = (target: string) => COMMANDS["loot.scan"].run(target);
+  g.loot = loot;
   /* eslint-enable @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access */
 }
 
@@ -391,8 +466,27 @@ function isCreepRole(value: string): value is CreepRole {
     "remoteMiner",
     "remoteHauler",
     "reserver",
-    "dismantler"
+    "dismantler",
+    "claimer",
+    "pioneer",
+    "looter"
   ].includes(value);
+}
+
+/**
+ * 查进度时不写房间名，就找那个正在干这件事的房间。
+ *
+ * 有第二个房间之后，"不写就用唯一那个"立刻失效了，每条命令都要补上房间名——
+ * 而 expand() 和 loot() 这类查进度的命令本来只有一个房间在做，让人再敲一遍
+ * 房间名纯属白费。只有真出现两个房间同时在做同一件事时才要求写明。
+ */
+function resolveDirective(roomName: string | undefined, active: (room: Room) => boolean): Room | string {
+  if (roomName) return resolveRoom(roomName);
+
+  const doing = Object.values(Game.rooms).filter(room => room.controller?.my && active(room));
+  if (doing.length === 1) return doing[0];
+
+  return resolveRoom(roomName);
 }
 
 /** 没写房间名时用唯一的己方房间；有多个就要求写清楚 */

@@ -36,11 +36,37 @@ const FIND_CONSTANTS: Record<string, number> = {
   FIND_MY_SPAWNS: 112,
   FIND_MY_CONSTRUCTION_SITES: 114,
   FIND_TOMBSTONES: 118,
+  FIND_HOSTILE_STRUCTURES: 109,
   FIND_RUINS: 123
 };
 
+/**
+ * 那些有真实取值的常量。
+ *
+ * 这些不能像 FIND_* 那样随便填：代码里会拿它们当键去查 store、比对 structureType，
+ * 填错了测试会"通过"而不是报错——两边都是 undefined 的相等断言是最骗人的那种绿灯。
+ */
+const VALUE_CONSTANTS: Record<string, string | number> = {
+  RESOURCE_ENERGY: "energy",
+  STRUCTURE_SPAWN: "spawn",
+  STRUCTURE_EXTENSION: "extension",
+  STRUCTURE_TOWER: "tower",
+  STRUCTURE_CONTAINER: "container",
+  STRUCTURE_STORAGE: "storage",
+  STRUCTURE_TERMINAL: "terminal",
+  STRUCTURE_RAMPART: "rampart",
+  STRUCTURE_WALL: "constructedWall",
+  STRUCTURE_ROAD: "road",
+  WORK: "work",
+  CARRY: "carry",
+  MOVE: "move",
+  ATTACK: "attack",
+  CLAIM: "claim",
+  CARRY_CAPACITY: 50
+};
+
 export function installGameConstants(): void {
-  for (const [name, value] of Object.entries(FIND_CONSTANTS)) {
+  for (const [name, value] of Object.entries({ ...FIND_CONSTANTS, ...VALUE_CONSTANTS })) {
     (global as any)[name] = value;
   }
 }

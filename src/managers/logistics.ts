@@ -83,7 +83,7 @@ export function claimSupply(creep: Creep, supplies: LogisticsEntry[]): Logistics
     : null;
   if (remembered && amountIn(remembered) > 0) return remembered;
 
-  const chosen = chooseEntry(creep.pos.x, creep.pos.y, supplies);
+  const chosen = chooseReachable(creep, supplies);
   if (!chosen) {
     delete creep.memory.withdrawFrom;
     return null;
@@ -106,7 +106,7 @@ export function claimDemand(creep: Creep, demands: LogisticsEntry[]): AnyStoreSt
     : null;
   if (remembered && remembered.store.getFreeCapacity(RESOURCE_ENERGY)) return remembered;
 
-  const chosen = chooseEntry(creep.pos.x, creep.pos.y, demands);
+  const chosen = chooseReachable(creep, demands);
   if (!chosen) {
     delete creep.memory.deliverTo;
     return null;
@@ -140,7 +140,40 @@ export function deductReservations(entries: LogisticsEntry[], reservations: Rese
 }
 
 /**
- * 挑一个最划算的目标：先看优先级，同优先级里挑最近的。
+ * 挑目标，同优先级里按真正要走几步算最近。
+ *
+ * 直线距离在 bunker 里会骗人。基地内部的 extension 是一条条斜带，中间只留一格
+ * 宽的路，两个直线距离 2 格的 extension 常常隔着一整排别的建筑，绕过去要走六七步。
+ * 照直线挑，hauler 装填时就会在基地里来回横穿：明明脚边那个没填，却先去了
+ * "看起来更近"的对岸。
+ *
+ * 只在同一档优先级里比路程，跨档不比——优先级表达的是紧迫程度，比距离重要。
+ * 寻路只在换目标那一 tick 跑（认领之后会一直记着），所以这笔开销摊得很薄。
+ */
+function chooseReachable(creep: Creep, entries: LogisticsEntry[]): LogisticsEntry | undefined {
+  const fallback = chooseEntry(creep.pos.x, creep.pos.y, entries);
+  if (!fallback) return undefined;
+
+  // 表是别的房间的（外派人员在回家路上就会这样），跨房间寻路又贵又没意义
+  const sample = Game.getObjectById(fallback.id as Id<LogisticsTarget>);
+  if (!sample || sample.room?.name !== creep.room.name) return fallback;
+
+  const group = entries.filter(entry => entry.amount > 0 && entry.priority === fallback.priority);
+  if (group.length < 2) return fallback;
+
+  const byCell = new Map(group.map(entry => [`${entry.x},${entry.y}`, entry]));
+  const goals = group.map(entry => new RoomPosition(entry.x, entry.y, creep.room.name));
+
+  // range 1 是必须的：extension 那一格本身站不进去，要求走到目标格上会直接判无路。
+  // ignoreCreeps 让结果稳定，否则同伴挪一步就换一个目标
+  const closest = creep.pos.findClosestByPath(goals, { ignoreCreeps: true, range: 1 });
+  if (!closest) return fallback;
+
+  return byCell.get(`${closest.x},${closest.y}`) ?? fallback;
+}
+
+/**
+ * 挑一个最划算的目标：先看优先级，同优先级里挑最近的（直线）。
  *
  * 不按"缺口大小"排序是有意的。优先级已经表达了紧迫程度，
  * 再掺进缺口大小只会让 hauler 舍近求远去填一个大但不急的坑。

@@ -47,6 +47,27 @@ export async function apiGet<T = any>(path: string): Promise<T> {
   return (await response.json()) as T;
 }
 
+export async function apiPost<T = any>(path: string, body: unknown): Promise<T> {
+  const response = await request(path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body)
+  });
+  if (!response.ok) throw new Error(`HTTP ${response.status} ${path}`);
+  return (await response.json()) as T;
+}
+
+/**
+ * 往 Memory 里写一个路径，等价于在游戏控制台里赋值。
+ *
+ * 用来在本地替控制台按下开关，比如给房间挂上搬运或分房的任务。写的是路径而不是
+ * 整个 Memory，不会覆盖掉游戏正在维护的其它字段。
+ */
+export async function setMemory(path: string, value: unknown): Promise<void> {
+  await apiPost("/user/memory", { path, value, shard: SHARD });
+  console.log(`Memory.${path} = ${JSON.stringify(value)}`);
+}
+
 export interface RoomObject {
   type: string;
   x: number;

@@ -16,6 +16,8 @@ import {
   unassignedReserveTarget
 } from "./remote";
 import { SUPPLY_PRIORITY, logisticsOf } from "./logistics";
+import { claimerQuota, expansionAssignment, pioneerQuota } from "./expansion";
+import { lootAssignment, looterQuota } from "./loot";
 import { bodyFor } from "../utils/body";
 import { containerAt } from "../utils/structures";
 import { hostilesIn } from "../roles/defender";
@@ -82,6 +84,12 @@ function quotaFor(room: Room, counts: Record<CreepRole, number>): Record<CreepRo
     reserver: reserverQuota(room),
     // 拆迁工是一次性投资：外矿的控制器被前人的墙圈住时才有配额，砸通了就归零
     dismantler: dismantlerQuota(room),
+    // 分房那两个也是一次性的：占领者只要一个、按一下就退役，拓荒者等新房
+    // 自己造得出人就撤。配额里已经含了孵化预算那道闸
+    claimer: claimerQuota(room),
+    pioneer: pioneerQuota(room),
+    // 搬空前人仓库是限时的白捡收入，抢完归零
+    looter: looterQuota(room),
     // 矿工挖的能量堆在地上，没人捡就填不进 spawn，光有矿工孵化不出下一个 creep。
     // 搬运工断档时先补一个自给自足的 harvester 把链条接上。
     harvester: counts.hauler === 0 ? 1 : 0,
@@ -179,6 +187,20 @@ const SPAWN_PRIORITY: CreepRole[] = [
   "harvester",
   "miner",
   "hauler",
+  // 占领者插在这么前面，是因为它便宜得离谱而效果不可逆：700 能量、21 tick 孵化，
+  // 换来一个永久归属的房间。而"还没占下"这个状态是会被别人终结的——预定只能靠
+  // 一个 600 tick 寿命的 CLAIM 顶着，那期间隔壁随时可以自己占了它。
+  // 排在它后面的每一个角色都只是让产出快一点，没有一个是抢不回来就没了的
+  "claimer",
+  // 拓荒者紧跟占领者。刚占下的房间在它们到场之前是完全停摆的：一个 creep 都
+  // 造不出来，而占着建筑上限的前人旧房子也只有它们能拆（destroy 在房间里有
+  // 外人时用不了，dismantle 没这条限制）。搬运和建造都不缺人手就能推进，
+  // 只有这一环是"没人就彻底不动"
+  "pioneer",
+  // 搬仓库排在建造和升级前面。它是有时间窗的：那批货就在无主房间里敞着，
+  // 隔壁邻居也看得见，早一百 tick 到就多拉走几千点。而且它搬回来的正是
+  // builder 和 upgrader 要花的钱——先有收入，再谈开销
+  "looter",
   "builder",
   "upgrader",
   "scout",
@@ -269,6 +291,10 @@ function assignmentFor(room: Room, role: CreepRole): Partial<CreepMemory> {
     return target ? { targetRoom: target } : {};
   }
 
+  // 分房只有一个目标，占领者和拓荒者都往那儿去，不用挑
+  if (role === "claimer" || role === "pioneer") return expansionAssignment(room);
+  if (role === "looter") return lootAssignment(room);
+
   return {};
 }
 
@@ -302,7 +328,10 @@ function countByRole(room: Room): Record<CreepRole, number> {
     remoteMiner: 0,
     remoteHauler: 0,
     reserver: 0,
-    dismantler: 0
+    dismantler: 0,
+    claimer: 0,
+    pioneer: 0,
+    looter: 0
   };
 
   for (const creep of Object.values(Game.creeps)) {
