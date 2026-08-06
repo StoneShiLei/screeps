@@ -92,16 +92,25 @@ function nearestHome(target: string): Room | undefined {
   return best;
 }
 
+/**
+ * 手动加外矿。
+ *
+ * 和自动挑选的区别只有一条：被别人预定的房间照样收。插旗是明确的人为决定，
+ * 而预定不阻止采矿——出口全被邻居占满时，那往往是唯一的候选。
+ */
 function addRemote(home: Room, target: string): string {
   const memory = Memory.rooms[target];
   if (!memory?.scouted) return `${target} 还没侦察过，等 scout 去过再插旗`;
-  if (memory.unusable) return `${target} 不可用：${memory.unusable}`;
+  if (memory.unusable && memory.unusable !== "reserved") return `${target} 不可用：${memory.unusable}`;
 
   const remotes = home.memory.remotes ?? [];
   if (remotes.includes(target)) return `${target} 已经在 ${home.name} 的外矿名单里`;
 
-  enableRemote(home, target);
-  return `${home.name} 外矿名单 → ${(home.memory.remotes ?? []).join(" ")}`;
+  const shared = memory.unusable === "reserved";
+  enableRemote(home, target, shared);
+
+  const note = shared ? "（这房间被别人预定着，只采矿不派预定员）" : "";
+  return `${home.name} 外矿名单 → ${(home.memory.remotes ?? []).join(" ")}${note}`;
 }
 
 /** 控制台的 flaghelp 用这张表生成说明，不手写第二份 */

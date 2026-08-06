@@ -156,7 +156,7 @@ export const COMMANDS: Record<string, Command> = {
   },
   "remote.add": {
     usage: "remote.add(target, room?)",
-    describe: "手动把某个房间加进外矿名单",
+    describe: "手动把某个房间加进外矿名单，被别人预定的也收",
     run: (target, roomName) => {
       if (!target) return "用法：remote.add(target, room?)";
 
@@ -165,12 +165,16 @@ export const COMMANDS: Record<string, Command> = {
 
       const memory = Memory.rooms[target];
       if (!memory?.scouted) return `${target} 还没侦察过，等 scout 去过再加`;
-      if (memory.unusable) return `${target} 不可用：${memory.unusable}`;
+      // 预定是唯一能人为推翻的一档：预定不阻止采矿，反而把源容量抬到 3000
+      if (memory.unusable && memory.unusable !== "reserved") return `${target} 不可用：${memory.unusable}`;
 
       if ((room.memory.remotes ?? []).includes(target)) return `${target} 已经在名单里`;
 
-      enableRemote(room, target);
-      return `${room.name} 外矿名单 → ${(room.memory.remotes ?? []).join(" ")}`;
+      const shared = memory.unusable === "reserved";
+      enableRemote(room, target, shared);
+
+      const note = shared ? "（被别人预定着，只采矿不派预定员）" : "";
+      return `${room.name} 外矿名单 → ${(room.memory.remotes ?? []).join(" ")}${note}`;
     }
   },
   "remote.drop": {
@@ -188,6 +192,8 @@ export const COMMANDS: Record<string, Command> = {
 
       remotes.splice(index, 1);
       delete Memory.rooms[target]?.home;
+      // 手动放行的标记跟着一起撤，否则下次自动挑选会把这个预定房又收回来
+      delete Memory.rooms[target]?.forced;
 
       // 认了这个房间的外派人员得放掉，否则它们会一直往一个不再采的房间跑
       for (const creep of Object.values(Game.creeps)) {

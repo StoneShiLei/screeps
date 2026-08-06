@@ -149,12 +149,25 @@ export function activeRemoteSources(home: Room): RemoteSource[] {
   return (activeCache.rooms[home.name] ??= collectActive(home));
 }
 
+/**
+ * 这个房间还采不采得。
+ *
+ * `unusable` 记的是侦察时的客观结论，而"被别人预定"是唯一一条可以由人推翻的：
+ * 预定不阻止别人采矿，反而把源的容量抬到 3000、再生翻倍到 10 每 tick——手动
+ * 指定的话，等于邻居替我们养着那个源。其余几档是物理上采不了，手动也没用。
+ */
+function isMinable(memory: RoomMemory): boolean {
+  if (!memory.unusable) return true;
+
+  return memory.unusable === "reserved" && memory.forced === true;
+}
+
 function collectActive(home: Room): RemoteSource[] {
   const found: RemoteSource[] = [];
 
   for (const roomName of home.memory.remotes ?? []) {
     const memory = Memory.rooms[roomName];
-    if (!memory || memory.unusable || isCoolingDown(memory) || needsProbe(memory)) continue;
+    if (!memory || !isMinable(memory) || isCoolingDown(memory) || needsProbe(memory)) continue;
 
     for (const [sourceId, spot] of Object.entries(memory.sources ?? {})) {
       found.push({ roomName, sourceId, x: spot.x, y: spot.y });
@@ -235,11 +248,18 @@ export function isReserved(roomName: string): boolean {
 export function reserveTargets(home: Room): string[] {
   if ((home.controller?.level ?? 0) < RESERVE_MIN_LEVEL) return [];
 
-  return [...new Set(activeRemoteSources(home).map(entry => entry.roomName))].filter(
+  return [...new Set(activeRemoteSources(home).map(entry => entry.roomName))].filter(roomName => {
+    const memory = Memory.rooms[roomName];
+
     // 控制器被墙圈住的房间先不派人。预定员到不了那一格，派过去就是站在墙外
     // 把 600 tick 的寿命耗光，还白占一个人口名额
-    roomName => !Memory.rooms[roomName]?.breach
-  );
+    if (memory?.breach) return false;
+
+    // 蹭别人预定的房间，绝不去顶他的预定。采矿是经济摩擦，抢控制器是宣战——
+    // 而愿意在自家门口养外矿的邻居，基本都比我们大。他那份预定还替我们把源
+    // 容量抬着，顶掉了反而两头都亏
+    return memory?.forced !== true;
+  });
 }
 
 /**
@@ -512,14 +532,16 @@ export function runRemoteManager(home: Room): void {
 /**
  * 把房间写进外矿名单，并算好路和矿边容器落点。
  *
- * 旗子 / 控制台手动加外矿也走这里，免得只改了名单却忘了规划。
+ * 旗子 / 控制台手动加外矿也走这里，免得只改了名单却忘了规划。手动那条路会带上
+ * forced，用来放行"被别人预定"的房间——自动挑选永远不碰那种房间。
  */
-export function enableRemote(home: Room, target: string): void {
+export function enableRemote(home: Room, target: string, forced = false): void {
   const remotes = (home.memory.remotes ??= []);
   if (!remotes.includes(target)) remotes.push(target);
 
   const memory = (Memory.rooms[target] ??= {} as RoomMemory);
   memory.home = home.name;
+  if (forced) memory.forced = true;
 
   // 路线和落点现在就算好存着。跨房间寻路要两万 ops，只在启用这一下跑一次；
   // 容器落点要紧挨着路面，所以路先算
@@ -544,7 +566,7 @@ function dropUnusable(home: Room, remotes: string[]): void {
     const memory = Memory.rooms[roomName];
     const mine = Game.rooms[roomName]?.controller?.my === true;
 
-    if (!mine && memory && !memory.unusable) continue;
+    if (!mine && memory && isMinable(memory)) continue;
 
     const reason = mine ? "已经占下来了，它自己就是个家" : (memory?.unusable ?? "没有记录");
     log.info("外矿", `${home.name} 放弃外矿 ${roomName}：${reason}`);
