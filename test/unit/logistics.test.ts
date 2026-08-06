@@ -1225,3 +1225,57 @@ describe("搬运工取货闸（有 storage 之后）", () => {
     );
   });
 });
+
+describe("遗迹与墓碑起送量", () => {
+  let saved: { Game: unknown; Memory: unknown };
+
+  beforeEach(() => {
+    installGameConstants();
+    const context = global as unknown as typeof saved;
+    saved = { Game: context.Game, Memory: context.Memory };
+
+    context.Game = { creeps: {}, rooms: {}, time: Math.floor(Math.random() * 1e6), getObjectById: () => null };
+    context.Memory = { rooms: {}, creeps: {} };
+  });
+
+  afterEach(() => {
+    Object.assign(global, saved);
+  });
+
+  function roomWith(ruinEnergy: number, tombEnergy: number): Room {
+    const ruin = {
+      id: "ruin1",
+      destroyTime: 1,
+      pos: { x: 10, y: 10 },
+      store: { energy: ruinEnergy }
+    };
+    const tomb = {
+      id: "tomb1",
+      deathTime: 1,
+      pos: { x: 11, y: 11 },
+      store: { energy: tombEnergy }
+    };
+
+    return {
+      name: `W${Math.floor(Math.random() * 1e6)}N9`,
+      memory: {},
+      find: (type: number) => {
+        if (type === FIND_RUINS) return [ruin];
+        if (type === FIND_TOMBSTONES) return [tomb];
+        return [];
+      }
+    } as unknown as Room;
+  }
+
+  it("遗迹哪怕只有十几能量也挂进供给表", () => {
+    const { supplies } = logisticsOf(roomWith(18, 0));
+
+    assert.equal(supplies.find(s => s.id === "ruin1")?.amount, 18);
+  });
+
+  it("墓碑低于五十就不挂，不值得专程跑", () => {
+    const { supplies } = logisticsOf(roomWith(0, 18));
+
+    assert.isUndefined(supplies.find(s => s.id === "tomb1"));
+  });
+});

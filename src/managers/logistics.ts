@@ -57,7 +57,12 @@ export const SUPPLY_PRIORITY = {
 /** tower 装到这个比例以上就不再补，免得 hauler 为了几十点能量反复跑 */
 const TOWER_REFILL_THRESHOLD = 0.8;
 
-/** 低于这个量的供给不值得专门跑一趟 */
+/**
+ * 低于这个量的供给不值得专门跑一趟。
+ *
+ * 遗迹除外：前人废墟会一直占着格子，里面的零头也该掏干净；墓碑很快蒸发，
+ * 为几十点能量跑一趟才划不来。
+ */
 const MIN_PICKUP_AMOUNT = 50;
 
 /** 供需表里的条目背后可能是建筑，也可能是墓碑、废墟或者地上的一堆能量 */
@@ -418,7 +423,8 @@ function collectSupplies(room: Room): LogisticsEntry[] {
     pushIfStocked(supplies, tombstone, SUPPLY_PRIORITY.decaying);
   }
   for (const ruin of room.find(FIND_RUINS)) {
-    pushIfStocked(supplies, ruin, SUPPLY_PRIORITY.decaying);
+    // 遗迹有一点就挂：不留零头占格子
+    pushIfStocked(supplies, ruin, SUPPLY_PRIORITY.decaying, 1);
   }
 
   const sites = room.find(FIND_MY_CONSTRUCTION_SITES).length;
@@ -473,9 +479,14 @@ function pushContainerDemand(entries: LogisticsEntry[], structure: StructureCont
   pushIfHungry(entries, structure, priority);
 }
 
-function pushIfStocked(entries: LogisticsEntry[], holder: AnyStoreStructure | Tombstone | Ruin, priority: number): void {
+function pushIfStocked(
+  entries: LogisticsEntry[],
+  holder: AnyStoreStructure | Tombstone | Ruin,
+  priority: number,
+  minAmount: number = MIN_PICKUP_AMOUNT
+): void {
   const available = holder.store[RESOURCE_ENERGY];
-  if (available < MIN_PICKUP_AMOUNT) return;
+  if (available < minAmount) return;
 
   entries.push({ id: holder.id, x: holder.pos.x, y: holder.pos.y, amount: available, priority });
 }
@@ -534,7 +545,14 @@ function supplyStillOpen(target: LogisticsTarget, room: Room): boolean {
     }
   }
 
-  return target.store[RESOURCE_ENERGY] >= MIN_PICKUP_AMOUNT;
+  // 遗迹认领后也掏到空；墓碑和其它供给仍卡 50 的起送线
+  const min = isRuin(target) ? 1 : MIN_PICKUP_AMOUNT;
+  return target.store[RESOURCE_ENERGY] >= min;
+}
+
+/** Ruin 有 destroyTime；墓碑是 deathTime，两者都有 store */
+function isRuin(target: LogisticsTarget): target is Ruin {
+  return "destroyTime" in target;
 }
 
 function isStoreContainer(target: LogisticsTarget): target is StructureContainer {
