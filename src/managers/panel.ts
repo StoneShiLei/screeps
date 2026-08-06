@@ -9,7 +9,9 @@ import { CROWDED, spawnLoadOf } from "./spawnLoad";
 import { SUPPLY_PRIORITY, logisticsOf } from "./logistics";
 import { isRemotePaused, reserveLeft } from "./remote";
 import { decodeCells } from "../planner/roads";
+import { expansionStatus } from "./expansion";
 import { isVisualOn } from "../utils/settings";
+import { lootStatus } from "./loot";
 import { roomPopulation } from "./spawnManager";
 
 /** 每隔这么多 tick 采一次升级进度，太密了噪声大，太稀了反应慢 */
@@ -141,6 +143,13 @@ function buildLines(room: Room, controller: StructureController): PanelLine[] {
 
   const remotes = remoteLine(room);
   if (remotes) lines.push(remotes);
+
+  // 分房和搬仓库都是有始有终的工程，进行中才占一行
+  const expansion = expansionStatus(room);
+  if (expansion) lines.push({ text: `分房 ${expansion}`, color: "#88ccff" });
+
+  const loot = lootStatus(room);
+  if (loot) lines.push({ text: `搬运 ${loot}`, color: "#ffdd44" });
 
   const cpu = Game.cpu.getUsed();
   const bucket = Game.cpu.bucket;
@@ -341,7 +350,10 @@ function shortRole(role: CreepRole): string {
     remoteMiner: "外矿",
     remoteHauler: "外运",
     reserver: "订",
-    dismantler: "拆"
+    dismantler: "拆",
+    claimer: "占",
+    pioneer: "拓",
+    looter: "搬"
   };
   return names[role];
 }

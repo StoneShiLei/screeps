@@ -58,6 +58,20 @@ export interface TravelOptions {
   visualizePathStyle?: PolyStyle;
 }
 
+/**
+ * 还没到目标房间就往那边走，返回 true 表示这一 tick 都在赶路。
+ *
+ * 奔的是房间中心而不是具体某一格：出发时那个房间往往还没有视野，看不见的房间
+ * 里连"哪一格能站"都不知道，指定精确目标只会让寻路在门口反复失败。进去之后
+ * 自然会重新寻路到真正要去的地方。
+ */
+export function commuteTo(creep: Creep, roomName: string): boolean {
+  if (creep.room.name === roomName) return false;
+
+  travelTo(creep, new RoomPosition(25, 25, roomName), { range: 20 });
+  return true;
+}
+
 export function travelTo(creep: Creep, target: RoomPosition | _HasRoomPosition, options: TravelOptions = {}): void {
   const range = options.range ?? 1;
   const destination = target instanceof RoomPosition ? target : target.pos;

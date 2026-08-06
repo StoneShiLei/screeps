@@ -12,9 +12,10 @@
 import { CLAIM_LIFETIME, partsWeight, spawnHeadroom } from "./spawnLoad";
 import { announce, log } from "../utils/logger";
 import { bodyFor, maxRepeatFor } from "../utils/body";
+import { commuteTo, travelTo } from "../movement/move";
+import { hostilesIn, intrudersIn } from "../roles/defender";
 import { costMatrixFor } from "../movement/costMatrix";
 import { planBreach } from "../movement/breach";
-import { travelTo } from "../movement/move";
 import { worldRange } from "../utils/distance";
 
 /**
@@ -153,7 +154,7 @@ function collectActive(home: Room): RemoteSource[] {
 
   for (const roomName of home.memory.remotes ?? []) {
     const memory = Memory.rooms[roomName];
-    if (!memory || memory.unusable || isCoolingDown(memory)) continue;
+    if (!memory || memory.unusable || isCoolingDown(memory) || needsProbe(memory)) continue;
 
     for (const [sourceId, spot] of Object.entries(memory.sources ?? {})) {
       found.push({ roomName, sourceId, x: spot.x, y: spot.y });
@@ -180,6 +181,31 @@ function positionOf(source: RemoteSource): RoomPosition {
 /** 还在遇袭冷却期里 */
 function isCoolingDown(memory: RoomMemory): boolean {
   return memory.raided !== undefined && Game.time - memory.raided < RAID_COOLDOWN;
+}
+
+/**
+ * 遇袭之后要先派人看一眼才准回去。
+ *
+ * 冷却结束不等于安全。房间没有视野，我们只知道"1500 tick 前那里有敌人"，
+ * 而冷却到点就直接补齐一整套人马的话，矿工和运输队要走几十格才发现敌人还在，
+ * 然后转头就跑——一次这样的空跑要赔上上千能量的孵化费和几百 tick 的寿命，
+ * 而且冷却会被重新触发，1500 tick 后再来一次，可以无限循环。
+ *
+ * 所以改成先派侦察兵。它 50 能量、一个 MOVE，进去看一眼就把结论带回来：
+ * 清了就全员复工，没清就继续等，代价是一个最便宜的 creep。
+ */
+function needsProbe(memory: RoomMemory): boolean {
+  if (memory.raided === undefined) return false;
+
+  return (memory.cleared ?? 0) < memory.raided;
+}
+
+/** 遇袭过、冷却也过了、就等一个人去确认的房间 */
+function probeTarget(home: Room): string | undefined {
+  return (home.memory.remotes ?? []).find(roomName => {
+    const memory = Memory.rooms[roomName];
+    return memory !== undefined && !memory.unusable && !isCoolingDown(memory) && needsProbe(memory);
+  });
 }
 
 /** 这个外矿是不是正在冷却，面板和控制台都用它判断，免得各自记一份冷却时长 */
@@ -570,12 +596,26 @@ export function watchRemote(room: Room): void {
   const memory = Memory.rooms[room.name];
   if (!memory?.home) return;
 
-  const hostiles = room.find(FIND_HOSTILE_CREEPS);
-  if (hostiles.length > 0) {
+  // 只有带武器的才算遇袭。邻居的矿工运输队天天在外矿里穿，见谁都撤的话，
+  // 那个房间等于自己让出去——对方一枪没放，我们的人却在冷却期里一直不去
+  const armed = hostilesIn(room);
+  if (armed.length > 0) {
     if (!isCoolingDown(memory)) {
-      log.warn("外矿", `${room.name} 有 ${hostiles.length} 个敌人，撤人并冷却 ${RAID_COOLDOWN} tick`);
+      log.warn("外矿", `${room.name} 有 ${armed.length} 个武装敌人，撤人并冷却 ${RAID_COOLDOWN} tick`);
     }
     memory.raided = Game.time;
+  } else {
+    // 有人在场且没看见武装敌人，这就是复工需要的那个确认
+    if (needsProbe(memory) && !isCoolingDown(memory)) {
+      log.info("外矿", `${room.name} 已确认清场，恢复采集`);
+    }
+    memory.cleared = Game.time;
+  }
+
+  // 抢矿的邻居只记一笔，不撤人。真要赶走它得靠塔或者兵，那是另一回事
+  const rivals = intrudersIn(room).length - armed.length;
+  if (rivals > 0) {
+    log.debug("外矿", () => `${room.name} 有 ${rivals} 个邻居的经济单位在抢矿，继续采`);
   }
 
   trackReservation(room, memory);
@@ -698,6 +738,10 @@ function username(): string {
  * 只看直接相邻的房间。隔着两格的房间运输成本已经高到不划算，先不铺这张网。
  */
 export function nextScoutTarget(home: Room): string | undefined {
+  // 复工前的确认排在探新房前面：那边有一整套人马在等这个结论
+  const probe = probeTarget(home);
+  if (probe) return probe;
+
   const exits = Game.map.describeExits(home.name);
   if (!exits) return undefined;
 
@@ -728,11 +772,7 @@ export function commuteOrFlee(creep: Creep, roomName: string): boolean {
     return true;
   }
 
-  if (creep.room.name === roomName) return false;
-
-  // 目标房间还没视野时先奔房间中心，进去了自然会重新寻路到具体那一格
-  travelTo(creep, new RoomPosition(25, 25, roomName), { range: 20 });
-  return true;
+  return commuteTo(creep, roomName);
 }
 
 /** 撤回基地。身上有货的话回去正好交掉，不算白跑 */

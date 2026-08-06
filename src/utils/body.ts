@@ -91,7 +91,24 @@ const TEMPLATES: Record<CreepRole, BodyTemplate> = {
   // 两个 WORK 配一个 MOVE：平地上每步的疲劳等于非 MOVE 部件数，一个 MOVE 每 tick
   // 消两点，这个比例刚好让它满载走平地也是一格一 tick。零头继续买 MOVE——它去的
   // 是没有路的外矿，早到几十 tick 就是早几十 tick 开始砸墙。
-  dismantler: { pattern: ["work", "work", "move"], fixed: [], maxRepeat: 16, filler: "move" }
+  dismantler: { pattern: ["work", "work", "move"], fixed: [], maxRepeat: 16, filler: "move" },
+
+  // 占领者：一个 CLAIM 就够，claimController 不看数量，多带一个纯浪费六百能量。
+  //
+  // MOVE 却要给到两个。它和预定员的差别在这里：预定员到岗之后一站几百 tick，
+  // 路上慢一点无所谓；占领者是一次性的，寿命只有 600 tick，全部价值都在"多快
+  // 走到那个控制器旁边"。一个 MOVE 拖着一个 CLAIM 在平地上要两 tick 一格，
+  // 两个 MOVE 就是一格一 tick——五十能量买回一半路程。
+  claimer: { pattern: ["move"], fixed: ["claim"], maxRepeat: 2 },
+
+  // 拓荒者就是能自己找饭吃的 builder。新房间什么都没有，它得自己挖、自己建，
+  // 所以 WORK CARRY MOVE 一比一比一，和 builder 同款。
+  pioneer: { pattern: ["work", "carry", "move"], fixed: [], maxRepeat: 5 },
+
+  // 搬空别人仓库的运输队。和外矿运输队同款一比一：那条路上没有路面，
+  // 二比一的省钱配法会让它满载时两 tick 才走一格，往返多花几十 tick。
+  // 一趟能拉走多少纯看 CARRY，所以上限给得高，预算有多少就装多少
+  looter: { pattern: ["carry", "move"], fixed: [], maxRepeat: 12 }
 };
 
 /** 输出顺序：受伤时身体从头开始掉，把 MOVE 放最后，残血了也还能挪回家 */

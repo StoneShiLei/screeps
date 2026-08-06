@@ -22,6 +22,12 @@ const MAX_CONSTRUCTION_SITES = 5;
 /** 每隔多少 tick 检查一次要不要拍新工地 */
 const BUILD_CHECK_INTERVAL = 10;
 
+/** 新占的分房每隔多少 tick 试一次算锚点 */
+const COLONY_PLAN_INTERVAL = 20;
+
+/** 工地拍不上时隔多少 tick 抱怨一次 */
+const SITE_FAILURE_INTERVAL = 100;
+
 /** bunker 从锚点往外铺几格 */
 const BUNKER_RADIUS = BUNKER_STRUCTURES.reduce(
   (max, structure) => Math.max(max, Math.abs(structure.dx), Math.abs(structure.dy)),
@@ -130,8 +136,8 @@ export function runRoomPlanner(room: Room): void {
   const flag = findPlannerFlag(room);
 
   // 已经有 spawn 时锚点是反推出来的，几乎不花 CPU，可以自动规划；
-  // 没有 spawn 就得全房间搜索最优位置，那个开销大，留给旗子手动触发。
-  if (!room.memory.anchor && (flag || room.find(FIND_MY_SPAWNS).length > 0)) {
+  // 没有 spawn 就得全房间搜索最优位置，那个开销大，留给旗子或者新占的分房触发。
+  if (!room.memory.anchor && (flag || room.find(FIND_MY_SPAWNS).length > 0 || readyToPlanColony(room))) {
     planRoom(room);
   } else if (
     room.memory.anchor &&
@@ -153,6 +159,20 @@ export function runRoomPlanner(room: Room): void {
 
 function findPlannerFlag(room: Room): Flag | undefined {
   return room.find(FIND_FLAGS).find(flag => flag.name.startsWith(PLANNER_FLAG_PREFIX));
+}
+
+/**
+ * 刚占下的分房该自己开始规划了。
+ *
+ * 归自己的房间却一个 spawn 都没有，只可能是刚占领的——重生时是先手动放 spawn
+ * 才有房间，顺序反过来。所以这个条件足够认出分房，不用另存标记。
+ *
+ * 隔几十 tick 才试一次：全房间搜锚点是笔不小的开销，而它有可能失败（地形放不下
+ * bunker），失败时锚点存不下来，下一 tick 又会重来一遍。刚占领的房间早二十
+ * tick 还是晚二十 tick 开工毫无差别，但每 tick 白烧一次全房间搜索会把 CPU 拖垮。
+ */
+function readyToPlanColony(room: Room): boolean {
+  return room.controller?.my === true && Game.time % COLONY_PLAN_INTERVAL === 0;
 }
 
 /**
@@ -347,7 +367,7 @@ function maintainConstructionSites(room: Room): void {
   clearInheritedWalls(room, anchor);
 
   const level = room.controller?.level ?? 0;
-  const wanted: PlannedSite[] = [...outpostSites(room), ...bunkerSites(anchor, level), ...roadSites(room, level)];
+  const wanted = wantedSites(room, anchor, level);
   wanted.sort((a, b) => buildOrder(a) - buildOrder(b));
 
   const batch = wanted.filter(site => !isBuilt(room, site)).slice(0, MAX_CONSTRUCTION_SITES);
@@ -356,8 +376,49 @@ function maintainConstructionSites(room: Room): void {
 
   for (const site of batch) {
     if (siteAt(room, site)) continue;
-    room.createConstructionSite(site.x, site.y, site.type);
+
+    const result = room.createConstructionSite(site.x, site.y, site.type);
+    if (result !== OK) reportSiteFailure(room, site, result);
   }
+}
+
+/**
+ * 工地没拍上要说清原因。
+ *
+ * 这里原来直接扔掉返回值，代价是有一次占下带旧基地的房间后，spawn 工地怎么都
+ * 不出现，而地形是空的、等级是够的、日志一片安静——只能靠在控制台里手动调
+ * createConstructionSite 才看出是 ERR_RCL_NOT_ENOUGH：建筑上限按房间里该类建筑的
+ * 总数算，前主人那个还立着的 spawn 占掉了名额。
+ *
+ * 隔一阵子才说一遍：这些失败多半会连续几百 tick 都成立，每 tick 一行就把日志淹了。
+ */
+function reportSiteFailure(room: Room, site: PlannedSite, result: ScreepsReturnCode): void {
+  if (Game.time % SITE_FAILURE_INTERVAL !== 0) return;
+
+  const reason =
+    result === ERR_RCL_NOT_ENOUGH
+      ? "等级不够或名额被占满（房间里前人的同类建筑也占名额，得先拆）"
+      : result === ERR_INVALID_TARGET
+        ? "这一格放不下"
+        : `错误码 ${result}`;
+
+  log.warn("规划", `${room.name} 拍不下 (${site.x},${site.y}) 的 ${site.type}：${reason}`);
+}
+
+/**
+ * 这个房间此刻该有哪些工地。
+ *
+ * 没有 spawn 的房间只拍 spawn，别的一个不拍。新占的分房正是这种状态，而它的
+ * 建造力全靠老家派来的几个拓荒者——那点产能要是先去建了矿边的容器，spawn 就
+ * 得往后推几百 tick，而在 spawn 立起来之前，容器、extension 全都是死物：
+ * 没有 spawn 就没有本地 creep，没有本地 creep 就没人用得上它们。
+ */
+function wantedSites(room: Room, anchor: Coord, level: number): PlannedSite[] {
+  if (room.find(FIND_MY_SPAWNS).length === 0) {
+    return bunkerSites(anchor, level).filter(site => site.type === "spawn");
+  }
+
+  return [...outpostSites(room), ...bunkerSites(anchor, level), ...roadSites(room, level)];
 }
 
 function bunkerSites(anchor: Coord, level: number): PlannedSite[] {
