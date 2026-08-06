@@ -8,7 +8,7 @@
  * 把所有已经认领它的 hauler 身上的货先减掉。取货端同理，扣掉正在赶来的空余容量。
  */
 
-import { containerAt } from "../utils/structures";
+import { isPlanned } from "../planner/roomPlanner";
 import { isVisualOn } from "../utils/settings";
 
 /** 需求方优先级，数字越小越先送 */
@@ -20,7 +20,17 @@ export const DEMAND_PRIORITY = {
   /** 控制器旁的容器，升级工的粮仓 */
   controller: 2,
   /** 兜底，实在没处送才往里塞 */
-  storage: 3
+  storage: 3,
+  /**
+   * 基地内的缓冲容器，排在最后。
+   *
+   * 它的用处是让 spawn 旁边随时有一桶现成的能量，补 extension 不用跑到矿边去；
+   * 但那是"别处都不缺了"之后才谈得上的奢侈，所以优先级压在 storage 之后。
+   *
+   * 没有这一档的时候它是个死物：不在需求表里，永远没人填，却照样每 100 tick
+   * 掉血、照样要人修。
+   */
+  buffer: 4
 };
 
 /** 供给方优先级，数字越小越先取 */
@@ -284,12 +294,16 @@ function collectReservations(room: Room): { pickups: Reservation[]; deliveries: 
 /**
  * 这个 creep 的认领算不算在这个房间头上。
  *
- * 除了归属本房间的，还要算上正站在这里的和正赶过来的外派人员：它们认领的
- * 就是这个房间里的货，漏掉的话几个外矿运输队会一起扑向同一堆能量，
- * 后到的那个白跑一趟几十格。
+ * 只认此刻就站在这个房间里的。在途量的全部意义是"它马上就到，别人不用再来"，
+ * 隔着两个房间的认领不满足这个前提，只会把需求表锁死。
+ *
+ * 这条曾经写成"归属本房间的也算"，代价是隔壁房间里一个 looter 就能让老家的
+ * 某个 extension 永远填不上：looter 的 memory.room 是老家，它带着上一趟的
+ * deliverTo 去外矿装货，往返一百多 tick 里那个 extension 在需求表里一直显示
+ * 已被认领，于是没有任何 hauler 去填它，而认领它的人在另一个房间搬货。
  */
 function concerns(creep: Creep, roomName: string): boolean {
-  return creep.memory.room === roomName || creep.room.name === roomName || creep.memory.targetRoom === roomName;
+  return creep.room.name === roomName;
 }
 
 function collectDemands(room: Room): LogisticsEntry[] {
@@ -308,10 +322,27 @@ function collectDemands(room: Room): LogisticsEntry[] {
     }
   }
 
-  // 控制器旁的容器不属于 FIND_MY_STRUCTURES（容器没有归属），单独找
-  if (upgradeSpot) {
-    const container = containerAt(room, upgradeSpot.x, upgradeSpot.y);
-    if (container) pushIfHungry(demands, container, DEMAND_PRIORITY.controller);
+  // 容器没有归属，不在 FIND_MY_STRUCTURES 里，得单独遍历
+  const miningSpots = Object.values(room.memory.miningSpots ?? {});
+
+  for (const structure of room.find(FIND_STRUCTURES)) {
+    if (structure.structureType !== STRUCTURE_CONTAINER) continue;
+
+    const { x, y } = structure.pos;
+    if (upgradeSpot && x === upgradeSpot.x && y === upgradeSpot.y) {
+      pushIfHungry(demands, structure, DEMAND_PRIORITY.controller);
+      continue;
+    }
+
+    // 矿边的容器只出不进。往里送就成了死循环：矿工挖满、搬运工搬走、
+    // 搬运工又发现它缺货再送回来
+    if (miningSpots.some(spot => spot.x === x && spot.y === y)) continue;
+
+    // 只填图纸上的。占领带旧基地的房间时地上会留着前人的容器，往里送货
+    // 等于替对方囤粮
+    if (!isPlanned(room, STRUCTURE_CONTAINER, x, y)) continue;
+
+    pushIfHungry(demands, structure, DEMAND_PRIORITY.buffer);
   }
 
   return demands;

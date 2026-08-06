@@ -14,7 +14,10 @@ import { announce, log } from "../utils/logger";
 import { bodyFor, maxRepeatFor } from "../utils/body";
 import { commuteTo, travelTo } from "../movement/move";
 import { hostilesIn, intrudersIn } from "../roles/defender";
+import { maintainRemoteRoadSites, planRemoteRoads, unbuiltRemoteRoads, wornRoad } from "../planner/remoteRoads";
+import { ROAD_MIN_LEVEL } from "../planner/roomPlanner";
 import { costMatrixFor } from "../movement/costMatrix";
+import { isRetiring } from "./relief";
 import { planBreach } from "../movement/breach";
 import { worldRange } from "../utils/distance";
 
@@ -88,17 +91,6 @@ export const RESERVED_MINER_WORK = 5;
  * RCL4 才凑得出两个 CLAIM 的大号。
  */
 const RESERVE_MIN_LEVEL = 3;
-
-/**
- * 提前多少 tick 孵化接班的预定员。
- *
- * 带 CLAIM 的 creep 只活 600 tick，而通勤要花掉一截。等在岗的死了才开始造下一个，
- * 那么整段通勤时间里房间都是没预定的状态；源的容量是在再生那一刻定的，断档正好
- * 撞上再生，那一轮就白少 1500 能量。
- *
- * 余量给到二十 tick：够孵化（五个部件以内）加上几 tick 的能量凑齐时间。
- */
-const RELIEF_MARGIN = 20;
 
 /**
  * 拆一段墙最多值得花几条命。
@@ -328,7 +320,7 @@ function heldReserveTargets(home: Room): Set<string> {
 
   for (const creep of Object.values(Game.creeps)) {
     if (creep.memory.role !== "reserver" || !creep.memory.targetRoom) continue;
-    if (isRetiring(creep, home)) continue;
+    if (isRetiringReserver(creep, home)) continue;
 
     held.add(creep.memory.targetRoom);
   }
@@ -338,25 +330,54 @@ function heldReserveTargets(home: Room): Set<string> {
 
 function retiringReservers(home: Room): number {
   return Object.values(Game.creeps).filter(
-    creep => creep.memory.role === "reserver" && creep.memory.room === home.name && isRetiring(creep, home)
+    creep => creep.memory.role === "reserver" && creep.memory.room === home.name && isRetiringReserver(creep, home)
   ).length;
 }
 
-/** 剩下的寿命只够走完通勤路了，接班的该出发了 */
-function isRetiring(creep: Creep, home: Room): boolean {
+/**
+ * 剩下的寿命只够走完通勤路了，接班的该出发了。
+ *
+ * 判断规则和房内的矿工共用一份（managers/relief），这里只负责算通勤：
+ * 外派人员的岗位在别的房间，只有外矿模块知道那有多远。
+ */
+function isRetiringReserver(creep: Creep, home: Room): boolean {
   const target = creep.memory.targetRoom;
   if (!target) return false;
 
-  const left = creep.ticksToLive;
-  // 还在孵化的没有 ticksToLive，它本身就是刚派出去的那个
-  if (left === undefined) return false;
+  return isRetiring(creep, remoteDistance(home, target));
+}
 
-  // 距离算不出来时一律当它还能干。判成快退休的后果是配额永久多一个名额，
-  // 也就是无休止地孵化预定员，把 spawn 时间全占了
-  const commute = remoteDistance(home, target);
-  if (!Number.isFinite(commute)) return false;
+/**
+ * 需要派人去铺路或补路的外矿房间。
+ *
+ * 交给拓荒者而不是给运输队挂 WORK，是一笔算得清的账。维护本身极便宜：一格路每
+ * 1000 tick 掉 100 血，一个 WORK 每 tick 修 100 血只花 1 能量，整条四十格的路线
+ * 一千 tick 的衰减也就四十能量。而给运输队挂 WORK 很贵——800 预算下它现在是
+ * 8C8M（400 容量），加一个 WORK 还得补一个 MOVE 才能维持满载全速，预算凑不出来，
+ * 只能退成 1W 6C 7M，运力直接少四分之一。用 25% 的运力换每千 tick 40 能量的维护，
+ * 账是反的。
+ *
+ * 建造更不适合顺手做：一格路 300 点进度，一个 WORK 每 tick 推 5 点，站着 60 tick
+ * 才铺完一格，而那是运输队半个往返。
+ *
+ * 拓荒者本来就会跨房间通勤、就地找能量、建造和修理，四个 WORK 每 tick 推 20 点，
+ * 15 tick 铺一格；能量直接吃矿工丢在地上的那堆，等于外矿自己出钱修自己的路。
+ */
+export function roadCrewTarget(home: Room): string | undefined {
+  if ((home.controller?.level ?? 0) < ROAD_MIN_LEVEL) return undefined;
 
-  return left <= commute + RELIEF_MARGIN;
+  for (const roomName of [...new Set(activeRemoteSources(home).map(entry => entry.roomName))]) {
+    if (isRemotePaused(roomName)) continue;
+
+    // 没视野时看不出铺没铺、磨没磨，等有人过去再说。矿工和运输队一直在那边跑，
+    // 视野不会缺很久
+    const room = Game.rooms[roomName];
+    if (!room) continue;
+
+    if (unbuiltRemoteRoads(room) > 0 || wornRoad(room)) return roomName;
+  }
+
+  return undefined;
 }
 
 /** 还没有矿工认领的外矿源，孵化时用它决定新人去哪 */
@@ -478,6 +499,10 @@ export function runRemoteManager(home: Room): void {
   remotes.push(candidate);
   Memory.rooms[candidate].home = home.name;
   log.info("外矿", `${home.name} 启用外矿 ${candidate}`);
+
+  // 路线现在就算好存着，等级到了自然会开工。跨房间寻路要两万 ops，
+  // 只在启用这一下跑一次
+  planRemoteRoads(home, candidate);
 }
 
 /**
@@ -485,14 +510,23 @@ export function runRemoteManager(home: Room): void {
  *
  * 别人来占了、来预定了、驻进了 invader core 都算。踢出去之后名额空出来，
  * 下一轮自然会挑别的房间补上。
+ *
+ * 自己占下来也要踢——而且这一条只能在这里判。定期复查（surveyRoom）只对
+ * 没有归属的房间跑，房间一旦归了自己，主循环就不再把它当外矿看，那份记录
+ * 于是永远停在"可用"上：预定员被一趟趟派去预定自己的控制器，运输队还在把
+ * 自家的能量当外矿往回搬。
  */
 function dropUnusable(home: Room, remotes: string[]): void {
   for (let i = remotes.length - 1; i >= 0; i--) {
-    const memory = Memory.rooms[remotes[i]];
-    if (memory && !memory.unusable) continue;
+    const roomName = remotes[i];
+    const memory = Memory.rooms[roomName];
+    const mine = Game.rooms[roomName]?.controller?.my === true;
 
-    log.warn("外矿", `${home.name} 放弃外矿 ${remotes[i]}：${memory?.unusable ?? "没有记录"}`);
-    delete Memory.rooms[remotes[i]]?.home;
+    if (!mine && memory && !memory.unusable) continue;
+
+    const reason = mine ? "已经占下来了，它自己就是个家" : (memory?.unusable ?? "没有记录");
+    log.info("外矿", `${home.name} 放弃外矿 ${roomName}：${reason}`);
+    delete Memory.rooms[roomName]?.home;
     remotes.splice(i, 1);
   }
 }
@@ -509,6 +543,8 @@ function bestCandidate(home: Room, remotes: string[]): string | undefined {
 
   for (const roomName of Object.values(Game.map.describeExits(home.name) ?? {})) {
     if (!roomName || remotes.includes(roomName)) continue;
+    // 自己的房间不是外矿，它有自己的矿工和搬运工
+    if (Game.rooms[roomName]?.controller?.my) continue;
 
     const memory = Memory.rooms[roomName];
     if (!memory?.scouted || memory.unusable) continue;
@@ -619,6 +655,11 @@ export function watchRemote(room: Room): void {
   }
 
   trackReservation(room, memory);
+
+  // 趁有人在场把路面工地补上。房间不归我们，runRoomPlanner 不管它，而无主房间里
+  // 造路不受等级限制（没有控制器就没有建筑上限）
+  const home = Game.rooms[memory.home];
+  if (home) maintainRemoteRoadSites(room, home.controller?.level ?? 0, ROAD_MIN_LEVEL);
 
   // 归属变化和 invader core 进驻都不是急事，隔一阵子复查一次就够
   if (Game.time % WATCH_INTERVAL === 0) {

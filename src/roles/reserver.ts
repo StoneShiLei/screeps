@@ -29,6 +29,14 @@ export function runReserver(creep: Creep): void {
   const controller = creep.room.controller;
   if (!controller) return;
 
+  // 这个房间已经归我们了。预定自己的房间是无效操作，而且再没有必要——
+  // 归属本身就把源的容量抬到了 3000
+  if (controller.my) {
+    log.info("外矿", `${creep.room.name} 已经是自己的房间，不用预定了`);
+    creep.suicide();
+    return;
+  }
+
   if (!creep.pos.isNearTo(controller)) {
     travelTo(creep, controller, { range: 1, visualizePathStyle: { stroke: "#aa66ff" } });
     return;

@@ -25,6 +25,7 @@ import { cleanupCreepMemory, cleanupRoomMemory } from "../utils/memory";
 import { isRemotePaused, reserveLeft } from "../managers/remote";
 import { loadByRole, spawnLoadOf } from "../managers/spawnLoad";
 import { lootPiles, lootStatus, startLoot, stopLoot } from "../managers/loot";
+import { flagHelpText } from "../managers/flags";
 import { logisticsOf } from "../managers/logistics";
 import { planRoom } from "../planner/roomPlanner";
 import { roomPopulation } from "../managers/spawnManager";
@@ -44,6 +45,11 @@ export const COMMANDS: Record<string, Command> = {
     usage: "help()",
     describe: "列出全部命令和用法",
     run: () => helpText()
+  },
+  flaghelp: {
+    usage: "flaghelp()",
+    describe: "列出可以用旗子下达的任务",
+    run: () => flagHelpText()
   },
   "debug.on": {
     usage: "debug.on(module)",
@@ -384,6 +390,7 @@ export function installCommands(): void {
   const g: any = global;
 
   g.help = () => COMMANDS.help.run();
+  g.flaghelp = () => COMMANDS.flaghelp.run();
   g.debug = {
     on: (module: string) => COMMANDS["debug.on"].run(module),
     off: (module: string) => COMMANDS["debug.off"].run(module),

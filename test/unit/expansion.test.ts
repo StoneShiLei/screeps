@@ -262,10 +262,19 @@ describe("搬空前人的仓库", () => {
     assert.equal(looterQuota(home({ loot: "W1N2" })), 1);
   });
 
-  it("货多就多派，但有上限——都挤在一个 terminal 前面也取不快", () => {
+  it("没有 storage 时压到两个人：运回来无处可放", () => {
     Memory.rooms.W1N2.lootLeft = 84_000;
 
-    assert.equal(looterQuota(home({ loot: "W1N2" })), 4);
+    // 出口只有 spawn、extension 和升级容器，几千点就满了。再多派人只是花孵化费
+    // 雇几个会走路的仓库
+    assert.equal(looterQuota(home({ loot: "W1N2" })), 2);
+  });
+
+  it("有了 storage 才放开到满编", () => {
+    Memory.rooms.W1N2.lootLeft = 84_000;
+    const withStorage = { ...home({ loot: "W1N2" }), storage: {} } as unknown as Room;
+
+    assert.equal(looterQuota(withStorage), 4, "一百万容量的坑，运多少都吃得下");
   });
 
   it("只剩零头就不专门派人了", () => {

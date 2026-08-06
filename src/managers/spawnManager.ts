@@ -16,13 +16,15 @@ import {
   unassignedReserveTarget
 } from "./remote";
 import { SUPPLY_PRIORITY, logisticsOf } from "./logistics";
-import { claimerQuota, expansionAssignment, pioneerQuota } from "./expansion";
+import { claimerQuota, colonyDefenders, expansionAssignment, pioneerQuota } from "./expansion";
 import { lootAssignment, looterQuota } from "./loot";
+import { blockedByIntruders } from "./demolish";
 import { bodyFor } from "../utils/body";
 import { containerAt } from "../utils/structures";
 import { hostilesIn } from "../roles/defender";
 import { isVisualOn } from "../utils/settings";
 import { log } from "../utils/logger";
+import { reliefSlots } from "./relief";
 import { sampleSpawnBusy } from "./spawnLoad";
 
 /** 搬运工的基础人数，再按地上堆了多少货往上加 */
@@ -73,8 +75,10 @@ function quotaFor(room: Room, counts: Record<CreepRole, number>): Record<CreepRo
 
   return {
     defender: defenderQuota(room),
-    miner: sources,
-    hauler: haulerQuota(room),
+    // 接班名额：矿工走到矿边要几十 tick（5 个 WORK 配 1 个 MOVE，平地五 tick 一格），
+    // 等它死了才开始孵化，那一整段是纯停产
+    miner: sources + reliefSlots(room, "miner"),
+    hauler: haulerQuota(room) + reliefSlots(room, "hauler"),
     // 侦察兵只在真有房间要探时才派，五十能量的东西不值得常备
     scout: nextScoutTarget(room) ? 1 : 0,
     remoteMiner: remoteSources,
@@ -108,7 +112,18 @@ function quotaFor(room: Room, counts: Record<CreepRole, number>): Record<CreepRo
  * 让本该继续运转的生产线也停了。
  */
 function defenderQuota(room: Room): number {
-  return Math.min(hostilesIn(room).length, MAX_DEFENDERS);
+  return localDefenders(room) + (colonyDefenders(room)?.count ?? 0);
+}
+
+/** 本土要留几个兵 */
+function localDefenders(room: Room): number {
+  const armed = hostilesIn(room).length;
+  if (armed > 0) return Math.min(armed, MAX_DEFENDERS);
+
+  // 没有武装敌人，但有赖着不走的外人堵住了拆迁：destroy 见到任何敌对 creep
+  // 就拒绝，而对方失去归属之后往往就地停摆，站着等老死能占一千五百 tick。
+  // 派一个兵去清场比等便宜得多——它们是矿工和运输队，一个攻击部件都没有
+  return blockedByIntruders(room) ? 1 : 0;
 }
 
 /**
@@ -295,7 +310,22 @@ function assignmentFor(room: Room, role: CreepRole): Partial<CreepMemory> {
   if (role === "claimer" || role === "pioneer") return expansionAssignment(room);
   if (role === "looter") return lootAssignment(room);
 
+  // 本土的名额先填满，多出来的那几个才远征。数已经在路上的人来分辨该派谁，
+  // 免得三个兵全留在家里而分房那边一个都没到
+  if (role === "defender") {
+    const relief = colonyDefenders(room);
+    if (relief && defendersSentTo(room, relief.target) < relief.count) return { targetRoom: relief.target };
+  }
+
   return {};
+}
+
+/** 已经派往这个分房的兵有几个（含还在路上的） */
+function defendersSentTo(home: Room, target: string): number {
+  return Object.values(Game.creeps).filter(
+    creep =>
+      creep.memory.role === "defender" && creep.memory.room === home.name && creep.memory.targetRoom === target
+  ).length;
 }
 
 /**

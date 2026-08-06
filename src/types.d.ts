@@ -115,6 +115,13 @@ interface RoomMemory {
    * 解码用 planner/roads 里的 decodeCells。
    */
   roads?: string;
+  /**
+   * 外矿路线在这个房间里的路段，编码方式和 roads 一样。
+   *
+   * 和 roads 分开存是为了互不干扰：房间重新规划不会冲掉外矿路线，换外矿时
+   * 也只用清掉自己这一段。读的时候两份取并集。
+   */
+  remoteRoads?: string;
   /** 上次检查建造进度的 tick，用来控制检查频率 */
   lastBuildCheck?: number;
   /** 上次播报时房间里的敌人数量，数量没变就不重复刷屏 */

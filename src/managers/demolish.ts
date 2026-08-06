@@ -68,8 +68,8 @@ export function runDemolition(room: Room): void {
   if (targets.length === 0) return;
 
   // destroy 在房间里有敌对 creep 时一律被拒绝，武装与否都算
-  if (intrudersIn(room).length > 0) {
-    log.debug("拆迁", () => `${room.name} 还有 ${intrudersIn(room).length} 个外人在场，destroy 用不了，等它们走`);
+  if (isBlocked(room)) {
+    log.debug("拆迁", () => `${room.name} 还有 ${intrudersIn(room).length} 个外人在场，destroy 用不了，先清场`);
     return;
   }
 
@@ -80,6 +80,24 @@ export function runDemolition(room: Room): void {
     if (result === OK) log.info("拆迁", `${room.name} 拆掉前人的 ${type} (${structure.pos.x},${structure.pos.y})`);
     else log.warn("拆迁", `${room.name} 拆不掉 (${structure.pos.x},${structure.pos.y}) 的 ${type}：错误码 ${result}`);
   }
+}
+
+/**
+ * 有活要干、但被赖着不走的外人堵住了。
+ *
+ * 这个状态会一直卡着不动：`destroy` 见到任何敌对 creep 就拒绝，而对方失去房间
+ * 归属之后往往就地停摆——它们不干活也不走，只是站着等老死，最长一千五百 tick。
+ * 整座前人基地占着建筑上限，我们的 spawn 和 extension 一个也拍不下来。
+ *
+ * 派一个兵过去清场比等便宜得多：它们是矿工和运输队，一个攻击部件都没有。
+ */
+export function isBlocked(room: Room): boolean {
+  return intrudersIn(room).length > 0;
+}
+
+/** 需要有人去清场的自有房间：有拆迁积压，而且被外人堵着 */
+export function blockedByIntruders(room: Room): boolean {
+  return demolitionList(room).length > 0 && isBlocked(room);
 }
 
 /**

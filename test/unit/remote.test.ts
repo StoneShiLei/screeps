@@ -143,6 +143,8 @@ describe("预定员接班", () => {
     const creep = {
       name: `reserver_${ticksToLive}`,
       memory: { role: "reserver", room: "W1N1", targetRoom: "W1N2" },
+      // 接班判断要算"造一个同样的要几 tick"，所以体型不能省
+      body: [{ type: "claim" }, { type: "move" }],
       ticksToLive
     };
 

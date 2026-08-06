@@ -16,9 +16,11 @@
 
 import { announce, log } from "../utils/logger";
 import { commuteTo, travelTo } from "../movement/move";
+import { commuteOrFlee } from "../managers/remote";
 import { demolitionTarget } from "../managers/demolish";
 import { energyPiles } from "../managers/loot";
 import { refreshEnergyState } from "../utils/energy";
+import { wornRoad } from "../planner/remoteRoads";
 
 export function runPioneer(creep: Creep): void {
   const roomName = creep.memory.targetRoom;
@@ -29,7 +31,10 @@ export function runPioneer(creep: Creep): void {
     return;
   }
 
-  if (commuteTo(creep, roomName)) {
+  // 去外矿铺路时要跟着外矿的撤退规则走：那边没有塔，遇袭冷却期站在那儿就是白送。
+  // 自己的分房不适用——那是我们的地盘，拆迁和建造都得继续
+  const ours = Game.rooms[roomName]?.controller?.my === true;
+  if (ours ? commuteTo(creep, roomName) : commuteOrFlee(creep, roomName)) {
     announce(creep, "拓荒");
     return;
   }
@@ -58,8 +63,24 @@ function work(creep: Creep): void {
     return;
   }
 
+  // 路铺完了就转去补磨损的那几格。外矿房间里没有塔，路没人管就会慢慢塌掉，
+  // 而这条路线正是它被派来的理由
+  const worn = wornRoad(creep.room);
+  if (worn) {
+    announce(creep, "补路");
+    if (creep.repair(worn) === ERR_NOT_IN_RANGE) {
+      travelTo(creep, worn, { visualizePathStyle: { stroke: "#ffdd44" } });
+    }
+    return;
+  }
+
   const controller = creep.room.controller;
-  if (!controller) return;
+  // 不是自己的控制器就升不了级（外矿铺路的情况）。手上的能量留着修路，
+  // 站在原地等下一格磨损比跑回家更省
+  if (!controller?.my) {
+    announce(creep, "待命");
+    return;
+  }
 
   announce(creep, "升级");
   if (creep.upgradeController(controller) === ERR_NOT_IN_RANGE) {

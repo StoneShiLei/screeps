@@ -2,12 +2,20 @@ export const Game: {
   creeps: { [name: string]: any };
   rooms: { [name: string]: any };
   spawns: any;
+  flags: { [name: string]: any };
+  map: any;
   time: any;
   getObjectById: (id: string) => any;
 } = {
   creeps: {},
   rooms: {},
   spawns: {},
+  // 主循环每 tick 都要把地图上的旗子兑现成任务，没有这一项它一进门就崩
+  flags: {},
+  map: {
+    describeExits: () => ({}),
+    getRoomLinearDistance: () => 1
+  },
   time: 12345,
   getObjectById: () => null
 };

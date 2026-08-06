@@ -6,6 +6,7 @@
  * 5 个 WORK 每 tick 挖 10 点，正好等于一个能量源的再生速率。
  */
 
+import { commuteInside, isRetiring } from "../managers/relief";
 import { announce } from "../utils/logger";
 import { holdPosition } from "../movement/traffic";
 import { travelTo } from "../movement/move";
@@ -52,10 +53,16 @@ function resolveSource(creep: Creep): Source | null {
     delete creep.memory.sourceId;
   }
 
+  // 快退休的人占的位不算占：接班的正是为它孵的，要是把它的源也算成"有人了"，
+  // 新矿工出生就找不到岗位，只能站在 spawn 边上等前辈死掉——那段等待恰好就是
+  // 提前孵化想省掉的那段
   const taken = new Set<string>();
   for (const other of Object.values(Game.creeps)) {
     if (other.memory.role !== "miner" || other.name === creep.name) continue;
-    if (other.memory.sourceId) taken.add(other.memory.sourceId);
+    if (!other.memory.sourceId) continue;
+    if (isRetiring(other, commuteInside(creep.room, other))) continue;
+
+    taken.add(other.memory.sourceId);
   }
 
   const spots = creep.room.memory.miningSpots ?? {};

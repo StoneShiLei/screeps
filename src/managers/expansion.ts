@@ -19,9 +19,11 @@
  */
 
 import { CLAIM_LIFETIME, partsWeight, spawnHeadroom } from "./spawnLoad";
+import { blockedByIntruders, demolitionList } from "./demolish";
 import { bodyFor } from "../utils/body";
-import { demolitionList } from "./demolish";
+import { hostilesIn } from "../roles/defender";
 import { log } from "../utils/logger";
+import { roadCrewTarget } from "./remote";
 import { worldRange } from "../utils/distance";
 
 /**
@@ -44,6 +46,22 @@ const PIONEERS_BUILDING = 4;
 
 /** spawn 建好之后留几个，帮新房把 extension 和容器铺开 */
 const PIONEERS_GROWING = 2;
+
+/**
+ * 去外矿铺路的只派一个。
+ *
+ * 铺路是慢工，多派人也快不了多少：四十格的路线要几千能量，而那些能量得从当地
+ * 矿工的产出里挤——派两个人只会把运输队该运走的那份分得更薄。
+ */
+const ROAD_CREW = 1;
+
+/**
+ * 增援分房最多派几个兵。
+ *
+ * 三个是"够压过一支小队"和"别把老家的孵化时间全占了"之间的界线。真要面对成建制
+ * 的部队，靠远征兵是打不赢的——那时候该做的是把分房升到 3 级建塔，或者认赔撤出。
+ */
+const MAX_COLONY_DEFENDERS = 3;
 
 /**
  * 新房间自己有这么多人就算能自理了。
@@ -125,6 +143,10 @@ export function pioneerQuota(home: Room): number {
   const stage = expansionStage(home);
   if (stage === "build") return affordable(home, PIONEERS_BUILDING);
   if (stage === "grow") return affordable(home, PIONEERS_GROWING);
+
+  // 分房那边不忙的时候，这套身体正好去外矿铺路：一样是跨房间通勤、就地找能量、
+  // 建造和修理，不必再造一种角色
+  if (roadCrewTarget(home)) return affordable(home, ROAD_CREW);
 
   return 0;
 }
@@ -243,10 +265,43 @@ export function expansionStatus(home: Room): string | undefined {
   return `${target} RCL${level}，自有 ${nativeCreeps(target)} 人`;
 }
 
-/** 给占领者和拓荒者派活：它们的目标房间就是老家正在开的那个分房 */
+/**
+ * 分房需要老家派几个兵。
+ *
+ * 只管还没有 spawn 的分房：有了 spawn 它自己就能造兵，不用老家跨房间支援。
+ *
+ * 两种情况都要派。一种是被赖着不走的经济单位堵住了拆迁，一个兵去清场就行。
+ * 另一种是真挨打了——新占的房间没有塔，也没有本地 spawn 补人，不派兵就是把
+ * 已经投进去的占领者、拓荒者和那个 spawn 工地一起送掉。
+ *
+ * 挨打时按敌人数量加一个：对方带着治疗单位时，火力必须压过它的回血量才推得动，
+ * 打成僵持等于两边一起烧钱而我们还多赔一条运输线。
+ */
+export function colonyDefenders(home: Room): { target: string; count: number } | undefined {
+  const target = expansionTarget(home);
+  if (!target) return undefined;
+
+  const room = Game.rooms[target];
+  if (!room?.controller?.my) return undefined;
+  if (room.find(FIND_MY_SPAWNS).length > 0) return undefined;
+
+  const armed = hostilesIn(room).length;
+  if (armed > 0) return { target, count: Math.min(armed + 1, MAX_COLONY_DEFENDERS) };
+
+  return blockedByIntruders(room) ? { target, count: 1 } : undefined;
+}
+
+/**
+ * 给占领者和拓荒者派活。
+ *
+ * 分房优先；分房那边不需要人的时候，拓荒者转去外矿铺路。
+ */
 export function expansionAssignment(home: Room): Partial<CreepMemory> {
   const target = expansionTarget(home);
-  return target ? { targetRoom: target } : {};
+  if (target) return { targetRoom: target };
+
+  const road = roadCrewTarget(home);
+  return road ? { targetRoom: road } : {};
 }
 
 /** 占领者的孵化预算占用，给 CLI 估成本用 */

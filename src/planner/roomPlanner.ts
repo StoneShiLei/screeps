@@ -12,6 +12,7 @@ import { canPlaceBunker, isBunkerCell, rankAnchors } from "./bunkerPlanner";
 import { decodeCells, planRoads } from "./roads";
 import { isVisualOn } from "../utils/settings";
 import { log } from "../utils/logger";
+import { remoteRoadCells } from "./remoteRoads";
 
 /** 在房间里放一个名字以此开头的旗子，就会触发规划并显示布局 */
 export const PLANNER_FLAG_PREFIX = "plan";
@@ -75,7 +76,7 @@ export function unlockLevel(structure: BunkerStructure): number {
  * 3 级时每 tick 才二十点收入，这笔钱砸进 extension 和 tower 的回报高得多。
  * 4 级解锁 storage，能量才真正宽裕起来。
  */
-const ROAD_MIN_LEVEL = 4;
+export const ROAD_MIN_LEVEL = 4;
 
 /**
  * 沼泽段是唯一的例外，可以提前单独铺。
@@ -263,6 +264,73 @@ function planOutpostsFor(room: Room, terrain: TerrainGrid, anchor: Coord): void 
   log.info("规划", `${room.name} 主干道 ${room.memory.roads.length / 2} 格`);
 }
 
+/**
+ * 当前等级下规划了、但还没建起来的数量。
+ *
+ * 面板要用它回答"还差多少"。光看活动工地数看不出进度：工地一次只开五个，
+ * 五个满着既可能意味着还剩五个，也可能意味着还剩五十个。
+ */
+export function pendingSiteCount(room: Room): number {
+  const anchor = room.memory.anchor;
+  if (!anchor) return 0;
+
+  const level = room.controller?.level ?? 0;
+  return wantedSites(room, anchor, level).filter(site => !isBuilt(room, site)).length;
+}
+
+/**
+ * 这一格上的这种建筑是不是我们规划的。
+ *
+ * 有两处要用它，都是为了别把力气花在不属于我们的东西上：塔的修理名单，
+ * 以及物流要不要往一个容器里送货。
+ *
+ * 判断只看"位置加类型"，不看归属。路和容器没有归属字段，前人留下的和我们
+ * 自己建的从对象上分不出来，唯一可靠的区别就是它站的地方在不在图纸上。
+ */
+export function isPlanned(room: Room, type: StructureConstant, x: number, y: number): boolean {
+  return plannedCells(room).has(cellKey(type, x, y));
+}
+
+function cellKey(type: StructureConstant, x: number, y: number): string {
+  return `${type}:${x},${y}`;
+}
+
+/** 图纸展开成集合，每房间每 tick 只展开一次 */
+const plannedCache: { tick: number; rooms: Record<string, Set<string>> } = { tick: -1, rooms: {} };
+
+function plannedCells(room: Room): Set<string> {
+  if (plannedCache.tick !== Game.time) {
+    plannedCache.tick = Game.time;
+    plannedCache.rooms = {};
+  }
+
+  return (plannedCache.rooms[room.name] ??= expandPlan(room));
+}
+
+function expandPlan(room: Room): Set<string> {
+  const cells = new Set<string>();
+  const anchor = room.memory.anchor;
+  if (!anchor) return cells;
+
+  for (const structure of BUNKER_STRUCTURES) {
+    cells.add(cellKey(structure.type, anchor.x + structure.dx, anchor.y + structure.dy));
+  }
+
+  // 房内主干道和外矿路线在这个房间里的路段，两份都算规划内
+  for (const cell of [...decodeCells(room.memory.roads ?? ""), ...remoteRoadCells(room.name)]) {
+    cells.add(cellKey("road", cell.x, cell.y));
+  }
+
+  for (const spot of Object.values(room.memory.miningSpots ?? {})) {
+    cells.add(cellKey("container", spot.x, spot.y));
+  }
+
+  const upgradeSpot = room.memory.upgradeSpot;
+  if (upgradeSpot) cells.add(cellKey("container", upgradeSpot.x, upgradeSpot.y));
+
+  return cells;
+}
+
 /** 把完整布局画在房间里，已经建好的用绿色标出来 */
 export function visualizePlan(room: Room): void {
   const anchor = room.memory.anchor;
@@ -312,11 +380,9 @@ export function visualizePlan(room: Room): void {
  * 那几格造价是平地的五倍，值得一眼看出来有几格踩在沼泽上。
  */
 function drawRoads(room: Room, level: number): void {
-  if (!room.memory.roads) return;
-
   const terrain = room.getTerrain();
 
-  for (const cell of decodeCells(room.memory.roads)) {
+  for (const cell of [...decodeCells(room.memory.roads ?? ""), ...remoteRoadCells(room.name)]) {
     const swamp = terrain.get(cell.x, cell.y) === TERRAIN_MASK_SWAMP;
     const unlocked = level >= (swamp ? SWAMP_ROAD_MIN_LEVEL : ROAD_MIN_LEVEL);
     const built = drawRoadDot(room, cell.x, cell.y, unlocked);
@@ -527,12 +593,14 @@ function outpostSites(room: Room): PlannedSite[] {
  * 工地名额剩下的那几个，建完一批下一轮再补——不会把名额从 extension 手里抢走。
  */
 function roadSites(room: Room, level: number): PlannedSite[] {
-  if (level < SWAMP_ROAD_MIN_LEVEL || !room.memory.roads) return [];
+  if (level < SWAMP_ROAD_MIN_LEVEL) return [];
 
   const terrain = room.getTerrain();
   const sites: PlannedSite[] = [];
 
-  for (const cell of decodeCells(room.memory.roads)) {
+  // 外矿路线在家这一侧的路段和房内主干道一起铺：它们本来就汇成同一条主干，
+  // 分两批铺只会让接口处空一截
+  for (const cell of [...decodeCells(room.memory.roads ?? ""), ...remoteRoadCells(room.name)]) {
     const swamp = terrain.get(cell.x, cell.y) === TERRAIN_MASK_SWAMP;
     if (!swamp && level < ROAD_MIN_LEVEL) continue;
 

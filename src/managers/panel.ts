@@ -12,6 +12,7 @@ import { decodeCells } from "../planner/roads";
 import { expansionStatus } from "./expansion";
 import { isVisualOn } from "../utils/settings";
 import { lootStatus } from "./loot";
+import { pendingSiteCount } from "../planner/roomPlanner";
 import { roomPopulation } from "./spawnManager";
 
 /** 每隔这么多 tick 采一次升级进度，太密了噪声大，太稀了反应慢 */
@@ -135,8 +136,11 @@ function buildLines(room: Room, controller: StructureController): PanelLine[] {
   lines.push(logisticsLine(room));
   lines.push(spawnLine(room));
 
+  // 分母是"这一级还差多少栋"。只看活动工地数看不出进度：工地一次只开五个，
+  // 五个满着既可能是还剩五栋，也可能是还剩五十栋
   const sites = room.find(FIND_MY_CONSTRUCTION_SITES).length;
-  lines.push({ text: `工地 ${sites}`, color: sites > 0 ? "#ffff88" : "#888888" });
+  const pending = pendingSiteCount(room);
+  lines.push({ text: `工地 ${sites}/${pending}`, color: pending > 0 ? "#ffff88" : "#888888" });
 
   const roads = roadLine(room);
   if (roads) lines.push(roads);

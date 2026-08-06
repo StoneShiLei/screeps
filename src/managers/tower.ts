@@ -6,6 +6,7 @@
  */
 
 import { hostilesIn, intrudersIn } from "../roles/defender";
+import { isPlanned } from "../planner/roomPlanner";
 
 /**
  * 修理的能量下限。
@@ -145,8 +146,31 @@ function weakest(structures: Structure[]): Structure | undefined {
   return best;
 }
 
+/**
+ * 值得修的东西：图纸上有、而且是自己的。
+ *
+ * 从"全房间凡是掉血又不是墙的都修"收紧到这一条，是因为占领带旧基地的房间之后
+ * 那种写法会闹出两件荒唐事：
+ *
+ * 一是替对方维护地产。前主人留下的 extension、storage、terminal 都还立在那里，
+ * 我们的塔一建好就开始拿自己的能量修它们。
+ *
+ * 二是和拆迁工对着干。dismantle 把血量打下来，被拆到一半的建筑就成了"掉血了"，
+ * 塔跟着修回去——两边烧同一份能量互相抵消，而且从现象上完全看不出为什么拆不动。
+ *
+ * 路和容器没有归属字段，前人的和自己的从对象上分不出来，只能靠图纸认。
+ */
 function repairTargets(room: Room): Structure[] {
-  return room.find(FIND_STRUCTURES, {
-    filter: structure => structure.hits < structure.hitsMax && !SKIP_REPAIR.includes(structure.structureType)
-  });
+  return room.find(FIND_STRUCTURES, { filter: structure => isWorthRepairing(room, structure) });
+}
+
+function isWorthRepairing(room: Room, structure: Structure): boolean {
+  if (structure.hits >= structure.hitsMax) return false;
+  if (SKIP_REPAIR.includes(structure.structureType)) return false;
+
+  // 有主的东西只修自己的
+  if ("my" in structure) return structure.my === true;
+
+  // 无主的（路、容器）看位置在不在图纸上
+  return isPlanned(room, structure.structureType, structure.pos.x, structure.pos.y);
 }

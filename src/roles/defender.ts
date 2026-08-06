@@ -10,8 +10,8 @@
  */
 
 import { announce, log } from "../utils/logger";
+import { commuteTo, travelTo } from "../movement/move";
 import { requestMove } from "../movement/traffic";
-import { travelTo } from "../movement/move";
 
 /** 敌人离得比这还远就先不管，省得被牵着满房间跑，离开塔的火力范围 */
 const CHASE_RANGE = 20;
@@ -93,12 +93,19 @@ export function intrudersIn(room: Room): Creep[] {
 }
 
 export function runDefender(creep: Creep): void {
+  if (dispatch(creep)) return;
+
   // 优先打带武器的，剩下的经济单位随手清理——先解决打得死人的那些
   const threat = threatOf(creep.room);
   const hostiles = threat.armed.length > 0 ? threat.armed : threat.all;
   const target = creep.pos.findClosestByRange(hostiles);
 
-  if (!target || creep.pos.getRangeTo(target) > CHASE_RANGE) {
+  // 追击距离的限制只在有塔的房间才成立：那条绳子拴的是"别离开火力掩护"。
+  // 没有塔的房间（刚占下的分房就是）没有掩护可言，追出去二十格和站在原地
+  // 一样安全，而不追就等于白派了一个兵——它会在门口一直站到老死。
+  const tooFar = threat.towered && target && creep.pos.getRangeTo(target) > CHASE_RANGE;
+
+  if (!target || tooFar) {
     rally(creep);
     return;
   }
@@ -112,17 +119,60 @@ export function runDefender(creep: Creep): void {
 }
 
 /**
+ * 远征清场：被派去别的房间时先赶过去，返回 true 表示这一 tick 都在路上。
+ *
+ * 用途是给还没有 spawn 的分房清场——那里没有塔也造不出兵，而赖着不走的外人
+ * 会让 destroy 一直失败，整座前人基地就一直占着建筑上限。
+ *
+ * 清空之后把目标忘掉，就地转成本土守卫：它还剩不少寿命，站在新家门口守着
+ * 比跑回老家有用。
+ */
+function dispatch(creep: Creep): boolean {
+  const target = creep.memory.targetRoom;
+  if (!target) return false;
+
+  if (creep.room.name === target) {
+    if (intrudersIn(creep.room).length > 0) return false;
+
+    log.info("防御", `${target} 已清场，${creep.name} 转为驻守`);
+    delete creep.memory.targetRoom;
+    return false;
+  }
+
+  announce(creep, "驰援");
+  return commuteTo(creep, target);
+}
+
+/**
  * 没仗打时回 spawn 边上待着。
  *
  * 待在门口而不是原地不动，是因为入侵者是冲着 spawn 来的，在那儿等
  * 等于站在必经之路上。
  */
 function rally(creep: Creep): void {
-  const spawn = creep.room.find(FIND_MY_SPAWNS)[0];
-  if (!spawn) return;
-
   announce(creep, "待命");
-  travelTo(creep, spawn.pos, { range: 3 });
+
+  const post = rallyPoint(creep.room);
+  if (post) travelTo(creep, post, { range: 3 });
+}
+
+/**
+ * 待命的地方。
+ *
+ * spawn 是首选，因为入侵者冲的就是它。但不能只认 spawn：刚占下的分房里前主人的
+ * spawn 已经拆掉、我们自己的还是个工地，那时候 `find(FIND_MY_SPAWNS)` 是空的，
+ * 而原来的写法遇到空就直接返回——被派去清场的兵会在进门那几格站到老死。
+ *
+ * 退而认锚点：那是未来的基地中心，也是新房间里最该守的地方。
+ */
+function rallyPoint(room: Room): RoomPosition | undefined {
+  const spawn = room.find(FIND_MY_SPAWNS)[0];
+  if (spawn) return spawn.pos;
+
+  const anchor = room.memory.anchor;
+  if (anchor) return new RoomPosition(anchor.x, anchor.y, room.name);
+
+  return room.controller?.pos;
 }
 
 /**
