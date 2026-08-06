@@ -1,5 +1,5 @@
 /**
- * remoteMiner：派驻在邻房能量源旁边，挖出来就丢地上。
+ * remoteMiner：派驻在邻房能量源旁边，站在矿边容器上挖。
  *
  * 和家里的 miner 有两处不同。
  *
@@ -7,9 +7,9 @@
  * 3 个 WORK 每 tick 挖 6 点已经超过再生速度，多带的 WORK 只会让它更早把源
  * 挖空然后闲着，白付一份孵化费和通勤费。
  *
- * 二是不修容器也不指望容器。外矿的容器要 creep 在场才能建，而且没人维护就
- * 一直 decay，前期直接丢地上更省事——地上的能量每 tick 只蒸发千分之一，
- * 运输队赶得及。
+ * 二是不自己建容器。外矿的容器和路统一交给拓荒者：它有 CARRY、会就地找能量，
+ * 本来就要去铺路。矿工只管站到落点上挖——没有 CARRY，挖出来的能量掉在脚下，
+ * 容器会自动收进去；容器还没建好就先堆在地上，运输队照样捡。
  */
 
 import { RESERVED_MINER_WORK, activeRemoteSources, commuteOrFlee, isReserved } from "../managers/remote";
@@ -37,6 +37,16 @@ export function runRemoteMiner(creep: Creep): void {
     // 站在房间里却拿不到对象，说明记的位置过时了，重新侦察一遍
     delete creep.memory.sourceId;
     return;
+  }
+
+  const spot = creep.room.memory.miningSpots?.[source.id];
+  if (spot && (creep.pos.x !== spot.x || creep.pos.y !== spot.y)) {
+    const target = creep.room.getPositionAt(spot.x, spot.y);
+    if (target) {
+      travelTo(creep, target, { range: 0, visualizePathStyle: { stroke: "#ffaa00" } });
+      creep.harvest(source);
+      return;
+    }
   }
 
   if (!creep.pos.isNearTo(source)) {

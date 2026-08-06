@@ -1,5 +1,5 @@
 import { cleanupCreepMemory, cleanupRoomMemory } from "utils/memory";
-import { evade, reportThreat, runDefender } from "roles/defender";
+import { evade, reportThreat, runDefender, runGuardian } from "roles/defender";
 import { runLootManager, trackLoot } from "managers/loot";
 import { runRemoteManager, watchRemote } from "managers/remote";
 import { ErrorMapper } from "utils/ErrorMapper";
@@ -11,6 +11,7 @@ import { runClaimer } from "roles/claimer";
 import { runDemolition } from "managers/demolish";
 import { runDismantler } from "roles/dismantler";
 import { runExpansionManager } from "managers/expansion";
+import { runFlagDirectives } from "managers/flags";
 import { runHarvester } from "roles/harvester";
 import { runHauler } from "roles/hauler";
 import { runLooter } from "roles/looter";
@@ -35,6 +36,8 @@ installCommands();
 export const loop = ErrorMapper.wrapLoop(() => {
   cleanupCreepMemory();
   cleanupRoomMemory();
+  // 插在地图上的旗子等于一条控制台命令，先把它们兑现成任务再进房间循环
+  runFlagDirectives();
 
   for (const roomName in Game.rooms) {
     const room = Game.rooms[roomName];
@@ -66,6 +69,11 @@ export const loop = ErrorMapper.wrapLoop(() => {
 
     if (creep.memory.role === "defender") {
       runDefender(creep);
+      continue;
+    }
+
+    if (creep.memory.role === "guardian") {
+      runGuardian(creep);
       continue;
     }
 

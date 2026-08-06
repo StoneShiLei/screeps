@@ -14,8 +14,12 @@
  * 本地 creep 的体型。
  */
 
+import { DEMAND_PRIORITY, claimDemand, logisticsOf } from "../managers/logistics";
 import { announce, log } from "../utils/logger";
 import { commuteTo, travelTo } from "../movement/move";
+import { wornContainer, wornRoad } from "../planner/remoteRoads";
+import { commuteOrFlee } from "../managers/remote";
+import { containerAt } from "../utils/structures";
 import { demolitionTarget } from "../managers/demolish";
 import { energyPiles } from "../managers/loot";
 import { refreshEnergyState } from "../utils/energy";
@@ -29,7 +33,10 @@ export function runPioneer(creep: Creep): void {
     return;
   }
 
-  if (commuteTo(creep, roomName)) {
+  // 去外矿铺路时要跟着外矿的撤退规则走：那边没有塔，遇袭冷却期站在那儿就是白送。
+  // 自己的分房不适用——那是我们的地盘，拆迁和建造都得继续
+  const ours = Game.rooms[roomName]?.controller?.my === true;
+  if (ours ? commuteTo(creep, roomName) : commuteOrFlee(creep, roomName)) {
     announce(creep, "拓荒");
     return;
   }
@@ -44,12 +51,16 @@ export function runPioneer(creep: Creep): void {
 }
 
 /**
- * 有工地就建，没有就升级控制器。
+ * 先给 spawn 和 extension 补能量，再建造，没有工地就升级控制器。
  *
- * spawn 永远排第一。新房间在 spawn 建成之前是完全不能自理的，其余任何建筑
- * 都得等——一个建好的 extension 在没有 spawn 的房间里毫无意义。
+ * 新房间刚立起 spawn 时最容易卡死：spawn 里只有几十点能量，每 tick 自恢复 1 点，
+ * 爬到 300 才能孵第一个人——而八格外往往就躺着前人的 terminal。拓荒者带 CARRY，
+ * 取货逻辑本来就会从那些仓库拿，送出去却没人写，等于捧着货站在空 spawn 旁边盖
+ * 容器。补孵化能量永远比多盖一栋 extension 急。
  */
 function work(creep: Creep): void {
+  if (creep.room.controller?.my && feedSpawn(creep)) return;
+
   const site = pickSite(creep);
   if (site) {
     if (creep.build(site) === ERR_NOT_IN_RANGE) {
@@ -58,13 +69,45 @@ function work(creep: Creep): void {
     return;
   }
 
+  // 工地清空后转去补磨损。外矿没有塔，容器和路都会慢慢塌，而修它们正是
+  // 派拓荒者过来的理由。容器优先：矿工站在上面，塌了能量就重新洒一地
+  const worn = wornContainer(creep.room) ?? wornRoad(creep.room);
+  if (worn) {
+    announce(creep, worn.structureType === STRUCTURE_CONTAINER ? "补桶" : "补路");
+    if (creep.repair(worn) === ERR_NOT_IN_RANGE) {
+      travelTo(creep, worn, { visualizePathStyle: { stroke: "#ffdd44" } });
+    }
+    return;
+  }
+
   const controller = creep.room.controller;
-  if (!controller) return;
+  // 不是自己的控制器就升不了级（外矿基建的情况）。手上的能量留着修，
+  // 站在原地等比跑回家更省
+  if (!controller?.my) {
+    announce(creep, "待命");
+    return;
+  }
 
   announce(creep, "升级");
   if (creep.upgradeController(controller) === ERR_NOT_IN_RANGE) {
     travelTo(creep, controller, { range: 3, visualizePathStyle: { stroke: "#88ff88" } });
   }
+}
+
+/** 把能量送进 spawn / extension。有缺口就返回 true，调用方别再干别的 */
+function feedSpawn(creep: Creep): boolean {
+  const hungry = logisticsOf(creep.room, creep).demands.filter(entry => entry.priority <= DEMAND_PRIORITY.spawn);
+  const target = claimDemand(creep, hungry);
+  if (!target) return false;
+
+  announce(creep, "填孵");
+  if (creep.transfer(target, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) {
+    travelTo(creep, target, { visualizePathStyle: { stroke: "#ffffff" } });
+  } else {
+    delete creep.memory.deliverTo;
+  }
+
+  return true;
 }
 
 function pickSite(creep: Creep): ConstructionSite | null {
@@ -73,6 +116,10 @@ function pickSite(creep: Creep): ConstructionSite | null {
 
   const spawn = sites.find(site => site.structureType === STRUCTURE_SPAWN);
   if (spawn) return spawn;
+
+  // 矿边容器比路面优先：一建好矿工的产出就进桶，运输队不用在地上扫
+  const container = sites.find(site => site.structureType === STRUCTURE_CONTAINER);
+  if (container) return container;
 
   return creep.pos.findClosestByPath(sites);
 }
@@ -116,6 +163,17 @@ function harvest(creep: Creep): void {
     return;
   }
 
+  // 外矿基建时矿边容器是现成的能量桶——修路/建路的材料直接从这里取，
+  // 不必跟运输队抢地上那一堆，也不必自己去挖
+  const mining = miningEnergy(creep.room);
+  if (mining) {
+    announce(creep, "取桶");
+    if (creep.withdraw(mining, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) {
+      travelTo(creep, mining, { visualizePathStyle: { stroke: "#ffaa00" } });
+    }
+    return;
+  }
+
   const stash = energyPiles(creep.room)[0];
   if (stash) {
     announce(creep, "取货");
@@ -137,6 +195,14 @@ function harvest(creep: Creep): void {
 }
 
 type Loot = Resource | Ruin | Tombstone;
+
+function miningEnergy(room: Room): StructureContainer | undefined {
+  for (const spot of Object.values(room.memory.miningSpots ?? {})) {
+    const container = containerAt(room, spot.x, spot.y);
+    if (container && container.store[RESOURCE_ENERGY] > 0) return container;
+  }
+  return undefined;
+}
 
 function pickLoot(creep: Creep): Loot | null {
   const dropped = creep.room

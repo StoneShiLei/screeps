@@ -10,8 +10,9 @@
  */
 
 import { announce, log } from "../utils/logger";
+import { commuteTo, travelTo } from "../movement/move";
+import { bodyFor } from "../utils/body";
 import { requestMove } from "../movement/traffic";
-import { travelTo } from "../movement/move";
 
 /** 敌人离得比这还远就先不管，省得被牵着满房间跑，离开塔的火力范围 */
 const CHASE_RANGE = 20;
@@ -32,6 +33,15 @@ const FLEE_OPS = 500;
  * 模块顶层引用会让单元测试加载阶段就崩。
  */
 const WEAPONS: BodyPartConstant[] = ["attack", "ranged_attack", "heal"];
+
+/**
+ * 系统 NPC 的用户名。
+ *
+ * 只有这些才是本土早期防御兵该打的对象：入侵者按房间累计采集量周期性刷新，
+ * 体型小、来了就走，几个便宜的地面兵加塔就能收拾。Source Keeper 待在中立矿房，
+ * 我们不占那种房间，列上只是把它一并归到"这不是玩家"这一类。
+ */
+const NPC_USERNAMES = ["Invader", "Source Keeper"];
 
 interface RoomThreat {
   /** 带武器的敌人。逃跑、孵化防御兵、外矿撤退都只认这些 */
@@ -92,13 +102,122 @@ export function intrudersIn(room: Room): Creep[] {
   return threatOf(room).all;
 }
 
+/**
+ * 打赢这批敌人要派几个兵。
+ *
+ * 不再一个敌人配一个兵——对方的 creep 往往比我们的小，一个满编 defender 的火力
+ * 能盖过好几个杂兵，照人头派兵会造出一堆闲着的。改按战力折算：把双方"能出手
+ * 的部件"（攻击、远程、治疗）各算一分，敌方总战力除以我方一个兵的战力向上取整，
+ * 才是真正压得过对面的头数。
+ *
+ * 敌方带治疗时再加一个：治疗会把分散的伤害奶回去，得多一个兵集火才压得过它的
+ * 回血。这一个是"够不够快打死"的余量，前面那道除法只保证"打不打得过"。
+ *
+ * budget 是负责孵化的那个房间的可用能量——本土防守用本房的，跨房驰援用老家的，
+ * 因为兵是从那里造出来的，战力也就照那里的体型算。
+ */
+export function defendersNeeded(hostiles: Creep[], budget: number): number {
+  if (hostiles.length === 0) return 0;
+
+  const enemyPower = hostiles.reduce((sum, hostile) => sum + combatParts(hostile.body.map(part => part.type)), 0);
+  const ownPower = Math.max(1, combatParts(bodyFor("defender", budget)));
+
+  const healed = hostiles.some(hostile => hostile.body.some(part => part.type === "heal"));
+  return Math.ceil(enemyPower / ownPower) + (healed ? 1 : 0);
+}
+
+/** 能在战斗里出手的部件数，TOUGH 那种纯血包不算火力 */
+function combatParts(body: BodyPartConstant[]): number {
+  return body.filter(part => WEAPONS.includes(part)).length;
+}
+
+/** 这个敌人是不是敌对玩家的（不是系统 NPC） */
+function isPlayer(creep: Creep): boolean {
+  return !NPC_USERNAMES.includes(creep.owner?.username ?? "");
+}
+
+/**
+ * 还有没有能出手的部件。
+ *
+ * ATTACK 被啃光的兵是走的尸体：部件不会再长回来（renew 也补不回被打掉的部件），
+ * 站在那儿既打不动人、又占着编制让替补孵不出来。判据是"身上还有没有 hits>0 的
+ * 武器部件"，PART_ORDER 把 TOUGH 垫在最前、ATTACK 在后，所以血包掉光才轮到它。
+ */
+export function stillArmed(creep: Creep): boolean {
+  return creep.body.some(part => WEAPONS.includes(part.type) && part.hits > 0);
+}
+
+/**
+ * 缴械了就自尽。
+ *
+ * 这是"没治疗、攻击件被打光还赖着不走"的解法：我们走的是廉价一次性防御兵、
+ * 全靠塔兜底的路子，加治疗凑小队是另一套复杂度，不划算。让残废的兵退场，
+ * 腾出编制让 spawn 立刻补一个满编的，比养着一具走不动刀的空壳强。
+ */
+function retireIfDisarmed(creep: Creep): boolean {
+  if (stillArmed(creep)) return false;
+
+  announce(creep, "缴械");
+  creep.suicide();
+  return true;
+}
+
+/**
+ * 本土早期防御兵该孵几个。这一步只管"该不该打、打几个"，不含跨房驰援。
+ *
+ * 只打系统入侵者：早期防御兵是为周期性刷新的 NPC 准备的应急手段，那种小体型的
+ * 波次几个便宜兵加塔就能压住。一旦场上有敌对玩家的武装单位，就直接返回零——
+ * 玩家的兵又大又会集火，我们现造的地面兵冲上去只是给对方送经验、把重启产线的
+ * 能量白白喂掉，反而拖垮自己（E28S35 那次死循环就是这么来的）。真打玩家是塔和
+ * rampart 的事，扛不住就认赔，而不是拿 spawn 一直往火里填人。
+ *
+ * 认得出是 NPC 的前提下，再按战力折算需要几个，最后被 cap 封顶。
+ */
+export function localDefenderCount(hostiles: Creep[], budget: number, cap: number): number {
+  if (hostiles.length === 0) return 0;
+  if (hostiles.some(isPlayer)) return 0;
+
+  return Math.min(defendersNeeded(hostiles, budget), cap);
+}
+
+/**
+ * 本土早期防御兵：就在自己房间里迎战，不跨房。
+ *
+ * 它的配额只在本房挨 NPC 入侵时才亮（见 localDefenderCount），所以这里不需要
+ * 再判断该不该打，直接找目标开打就是。
+ */
 export function runDefender(creep: Creep): void {
+  if (retireIfDisarmed(creep)) return;
+
+  fight(creep);
+}
+
+/**
+ * 远程协防兵：从老家孵出来，先赶到分房，清完场就地转为驻守。
+ *
+ * 和早期防御兵是两个兵种、两套账：早期防御兵守本土、只打 NPC；协防兵是老家有
+ * 余裕时派去替弱小分房扛一阵的远征力量。战斗动作两者共用 fight，区别只在这一
+ * 步跨房通勤。
+ */
+export function runGuardian(creep: Creep): void {
+  if (retireIfDisarmed(creep)) return;
+  if (dispatch(creep)) return;
+
+  fight(creep);
+}
+
+function fight(creep: Creep): void {
   // 优先打带武器的，剩下的经济单位随手清理——先解决打得死人的那些
   const threat = threatOf(creep.room);
   const hostiles = threat.armed.length > 0 ? threat.armed : threat.all;
   const target = creep.pos.findClosestByRange(hostiles);
 
-  if (!target || creep.pos.getRangeTo(target) > CHASE_RANGE) {
+  // 追击距离的限制只在有塔的房间才成立：那条绳子拴的是"别离开火力掩护"。
+  // 没有塔的房间（刚占下的分房就是）没有掩护可言，追出去二十格和站在原地
+  // 一样安全，而不追就等于白派了一个兵——它会在门口一直站到老死。
+  const tooFar = threat.towered && target && creep.pos.getRangeTo(target) > CHASE_RANGE;
+
+  if (!target || tooFar) {
     rally(creep);
     return;
   }
@@ -112,17 +231,60 @@ export function runDefender(creep: Creep): void {
 }
 
 /**
+ * 远征清场：被派去别的房间时先赶过去，返回 true 表示这一 tick 都在路上。
+ *
+ * 用途是给还没有 spawn 的分房清场——那里没有塔也造不出兵，而赖着不走的外人
+ * 会让 destroy 一直失败，整座前人基地就一直占着建筑上限。
+ *
+ * 清空之后把目标忘掉，就地转成本土守卫：它还剩不少寿命，站在新家门口守着
+ * 比跑回老家有用。
+ */
+function dispatch(creep: Creep): boolean {
+  const target = creep.memory.targetRoom;
+  if (!target) return false;
+
+  if (creep.room.name === target) {
+    if (intrudersIn(creep.room).length > 0) return false;
+
+    log.info("防御", `${target} 已清场，${creep.name} 转为驻守`);
+    delete creep.memory.targetRoom;
+    return false;
+  }
+
+  announce(creep, "驰援");
+  return commuteTo(creep, target);
+}
+
+/**
  * 没仗打时回 spawn 边上待着。
  *
  * 待在门口而不是原地不动，是因为入侵者是冲着 spawn 来的，在那儿等
  * 等于站在必经之路上。
  */
 function rally(creep: Creep): void {
-  const spawn = creep.room.find(FIND_MY_SPAWNS)[0];
-  if (!spawn) return;
-
   announce(creep, "待命");
-  travelTo(creep, spawn.pos, { range: 3 });
+
+  const post = rallyPoint(creep.room);
+  if (post) travelTo(creep, post, { range: 3 });
+}
+
+/**
+ * 待命的地方。
+ *
+ * spawn 是首选，因为入侵者冲的就是它。但不能只认 spawn：刚占下的分房里前主人的
+ * spawn 已经拆掉、我们自己的还是个工地，那时候 `find(FIND_MY_SPAWNS)` 是空的，
+ * 而原来的写法遇到空就直接返回——被派去清场的兵会在进门那几格站到老死。
+ *
+ * 退而认锚点：那是未来的基地中心，也是新房间里最该守的地方。
+ */
+function rallyPoint(room: Room): RoomPosition | undefined {
+  const spawn = room.find(FIND_MY_SPAWNS)[0];
+  if (spawn) return spawn.pos;
+
+  const anchor = room.memory.anchor;
+  if (anchor) return new RoomPosition(anchor.x, anchor.y, room.name);
+
+  return room.controller?.pos;
 }
 
 /**

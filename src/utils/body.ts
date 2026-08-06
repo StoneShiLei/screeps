@@ -35,7 +35,14 @@ interface BodyTemplate {
   maxRepeat: number;
   /** 预算宽裕时才加的锦上添花部件 */
   bonus?: { minBudget: number; parts: BodyPartConstant[] };
-  /** 凑不满一整组的零头拿来买什么，默认 CARRY */
+  /**
+   * 凑不满一整组的零头拿来买什么。不填就不补零头。
+   *
+   * 补零头会往身上加一个不带 MOVE 的部件，对纯搬运（CARRY:MOVE 一比一）这种
+   * "满载正好全速"的角色是净损失：多一个 CARRY 就把满载从 1t/格拖成 2t/格，
+   * 早到那点容量远不抵翻倍的路程。所以只给"补了也不降速档"的角色开（带 WORK
+   * 自重、满载本就 2t 的建造类，或站着不动的矿工），其余宁可把零头扔了。
+   */
   filler?: BodyPartConstant;
 }
 
@@ -55,14 +62,31 @@ interface BodyTemplate {
 const TEMPLATES: Record<CreepRole, BodyTemplate> = {
   // 预算够的话给 miner 配一个 CARRY：挖出来的能量会先进自己的口袋再溢进容器，
   // 正好拿这 50 点能量顺手修脚下的容器，省得另派人跑一趟。
-  miner: { pattern: ["work"], fixed: ["move"], maxRepeat: 5, bonus: { minBudget: 600, parts: ["carry"] } },
+  // 站着挖矿的，零头买 CARRY 给自己配个口袋——低预算时它是修脚下容器的唯一来源。
+  // miner 不通勤，补不补零头都不影响移动。
+  miner: {
+    pattern: ["work"],
+    fixed: ["move"],
+    maxRepeat: 5,
+    bonus: { minBudget: 600, parts: ["carry"] },
+    filler: "carry"
+  },
+  // 纯搬运不补零头：CARRY:MOVE 一比一时满载正好 1t/格，多塞一个 CARRY 就掉到 2t/格。
   hauler: { pattern: ["carry", "move"], fixed: [], maxRepeat: 10 },
-  upgrader: { pattern: ["work"], fixed: ["carry", "move", "move"], maxRepeat: 8 },
-  builder: { pattern: ["work", "carry", "move"], fixed: [], maxRepeat: 5 },
-  harvester: { pattern: ["work", "carry", "move"], fixed: [], maxRepeat: 3 },
+  // 钉在控制器旁不通勤，零头买 CARRY 顶多多存一点，也不拖速度。
+  upgrader: { pattern: ["work"], fixed: ["carry", "move", "move"], maxRepeat: 8, filler: "carry" },
+  // 建造类自带 WORK 自重，满载本就 2t/格，零头买 CARRY 只加容量不再降速档，是净赚。
+  builder: { pattern: ["work", "carry", "move"], fixed: [], maxRepeat: 5, filler: "carry" },
+  harvester: { pattern: ["work", "carry", "move"], fixed: [], maxRepeat: 3, filler: "carry" },
   // defender 的零头买 TOUGH：10 能量一个、抵 100 点伤害，是全表里最便宜的血。
   // 它挡不住多少刀，但足够撑到塔或者同伴补上——而这些零头本来是要浪费掉的。
   defender: { pattern: ["attack", "move"], fixed: [], maxRepeat: 10, filler: "tough" },
+
+  // guardian 是派去驰援分房的协防兵，打法和 defender 一样，只是从老家跨房过去。
+  // 它整个活儿就是跨房赶路，慢一格就是晚到，所以零头不买 TOUGH 而买 MOVE：
+  // 预算除不尽一组（130）时那点零头买成 TOUGH 会把非移动部件堆到 MOVE 的两倍多，
+  // 平地上直接变 2~3t 才挪一格。宁可少块肉盾，也要保住 1t/格的行军速度。
+  guardian: { pattern: ["attack", "move"], fixed: [], maxRepeat: 10, filler: "move" },
 
   // scout 只要视野，不干活也不挨打。一个 MOVE 五十能量，死了再造一个就是
   scout: { pattern: ["move"], fixed: [], maxRepeat: 1 },
@@ -76,17 +100,16 @@ const TEMPLATES: Record<CreepRole, BodyTemplate> = {
   // 二比一那种省钱配法会让它在平地上就走两 tick 一格，往返多花几十 tick
   remoteHauler: { pattern: ["carry", "move"], fixed: [], maxRepeat: 12 },
 
-  // 预定员只要一个 CLAIM。
+  // 预定员的 CLAIM 数跟着预算走：一组 claim+move 要 650 能量，RCL3 的 800 上限
+  // 只买得起一个，RCL4 的 1300 正好两个，上限封在 2。
   //
-  // 预定的剩余时长每 tick 自减一，一个 CLAIM 每 tick 补一，净增为零——但那正好够：
-  // 源的容量是在再生的那一刻按"这个房间此刻有没有被预定"决定的，只要人在岗，
-  // 房间就一直算被预定，容量就是 3000。攒余量只对换人的空窗有意义。
+  // 一个 CLAIM 是净零——预定每 tick 自减一、补一，只维持不积累，所以必须连续在岗，
+  // 断一 tick 就掉出预定。够 RCL3 用：省钱、早几千 tick 让外矿翻倍，空窗靠提前接班盖。
   //
-  // 两个 CLAIM 能攒余量，摊到每 tick 的成本也几乎一样（1250 管 2×(600-路程) tick，
-  // 对 650 管 600-路程），但它要 1300 能量、得等 RCL4；一个 CLAIM 只要 650，
-  // RCL3 造出七个 extension 就够，能早几千 tick 让外矿产能翻倍。空窗靠提前孵化
-  // 接班的人来盖，那比多背一个 CLAIM 便宜。
-  reserver: { pattern: ["claim", "move"], fixed: [], maxRepeat: 1 },
+  // 两个 CLAIM 净增一，能把预定攒到 5000 封顶：既能靠余量省下"一直杵着"的开销，
+  // 也是抢预定的力气来源——attackController 每 CLAIM 每 tick 削对方一点，两个削得
+  // 快一倍。所以升到 RCL4 就换两个 CLAIM，补员逻辑也随之从"接班"改成"按余量补"。
+  reserver: { pattern: ["claim", "move"], fixed: [], maxRepeat: 2 },
 
   // 两个 WORK 配一个 MOVE：平地上每步的疲劳等于非 MOVE 部件数，一个 MOVE 每 tick
   // 消两点，这个比例刚好让它满载走平地也是一格一 tick。零头继续买 MOVE——它去的
@@ -102,12 +125,13 @@ const TEMPLATES: Record<CreepRole, BodyTemplate> = {
   claimer: { pattern: ["move"], fixed: ["claim"], maxRepeat: 2 },
 
   // 拓荒者就是能自己找饭吃的 builder。新房间什么都没有，它得自己挖、自己建，
-  // 所以 WORK CARRY MOVE 一比一比一，和 builder 同款。
-  pioneer: { pattern: ["work", "carry", "move"], fixed: [], maxRepeat: 5 },
+  // 所以 WORK CARRY MOVE 一比一比一，和 builder 同款，零头也同样买 CARRY。
+  pioneer: { pattern: ["work", "carry", "move"], fixed: [], maxRepeat: 5, filler: "carry" },
 
   // 搬空别人仓库的运输队。和外矿运输队同款一比一：那条路上没有路面，
   // 二比一的省钱配法会让它满载时两 tick 才走一格，往返多花几十 tick。
-  // 一趟能拉走多少纯看 CARRY，所以上限给得高，预算有多少就装多少
+  // 一趟能拉走多少纯看 CARRY，所以上限给得高，预算有多少就装多少。
+  // 纯搬运不补零头，免得多一个 CARRY 把满载拖成 2t/格。
   looter: { pattern: ["carry", "move"], fixed: [], maxRepeat: 12 }
 };
 
@@ -143,10 +167,11 @@ export function bodyFor(role: CreepRole, budget: number, repeatLimit?: number): 
     body.push(...template.pattern);
   }
 
-  // 只有"钱不够再凑一组"时才花零头。顶到角色上限的一律不加：预算刚好买满
-  // 上限那一档时零头看着像白扔，可给预定员塞三个 MOVE、给矿工塞第六个 WORK
-  // 都是纯亏——多出来的部件每 tick 都在收孵化费，却一点产出都不多。
-  if (repeat < limit) spendLeftover(body, budget, template.filler ?? "carry");
+  // 只有"钱不够再凑一组"、且这个角色明确要补零头时才补。顶到角色上限的一律不加：
+  // 预算刚好买满上限那一档时零头看着像白扔，可给预定员塞三个 MOVE、给矿工塞第六个
+  // WORK 都是纯亏。没配 filler 的角色（纯搬运、纯赶路）宁可把零头扔了，也不拿一个
+  // 不带 MOVE 的部件把满载速度从 1t/格拖成 2t/格。
+  if (repeat < limit && template.filler) spendLeftover(body, budget, template.filler);
 
   return body.sort((a, b) => PART_ORDER.indexOf(a) - PART_ORDER.indexOf(b));
 }

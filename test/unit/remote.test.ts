@@ -108,7 +108,7 @@ describe("外矿体型", () => {
 });
 
 describe("预定员体型", () => {
-  it("一个 CLAIM 一个 MOVE，650 能量，RCL3 就造得出", () => {
+  it("RCL3 的 800 预算只买得起一个 CLAIM", () => {
     const body = bodyFor("reserver", 800);
 
     // 净增为零照样让房间处于被预定状态，源容量就是 3000；攒余量只对换人的空窗有用
@@ -122,20 +122,30 @@ describe("预定员体型", () => {
     assert.lengthOf(bodyFor("reserver", 800), 2);
   });
 
-  it("再有钱也不加第二个 CLAIM，那是花一倍的钱买同样的每 tick 成本", () => {
-    assert.equal(countPart(bodyFor("reserver", 5000), "claim"), 1);
+  it("RCL4 的 1300 预算正好两个 CLAIM，能攒余量也能加快抢预定", () => {
+    const body = bodyFor("reserver", 1300);
+
+    assert.equal(countPart(body, "claim"), 2);
+    assert.equal(countPart(body, "move"), 2);
+    assert.equal(bodyCost(body), 1300);
+  });
+
+  it("再有钱也不加第三个 CLAIM，模板封顶两个", () => {
+    assert.equal(countPart(bodyFor("reserver", 5000), "claim"), 2);
   });
 });
 
-describe("预定员接班", () => {
+describe("预定员接班（单 CLAIM）", () => {
   class FakePosition {
     public constructor(public x: number, public y: number, public roomName: string) {}
   }
 
+  // RCL3 / 800 预算：一个 CLAIM，净零，必须按死亡时间提前接班
   // anchor 到源是 65 格，所以剩余寿命低于 65 + 20 的就该有人接班了
   const home = {
     name: "W1N1",
-    controller: { level: 4 },
+    controller: { level: 3 },
+    energyCapacityAvailable: 800,
     memory: { remotes: ["W1N2"], anchor: { x: 25, y: 25 } }
   } as unknown as Room;
 
@@ -143,6 +153,8 @@ describe("预定员接班", () => {
     const creep = {
       name: `reserver_${ticksToLive}`,
       memory: { role: "reserver", room: "W1N1", targetRoom: "W1N2" },
+      // 接班判断要算"造一个同样的要几 tick"，所以体型不能省
+      body: [{ type: "claim" }, { type: "move" }],
       ticksToLive
     };
 
@@ -190,6 +202,84 @@ describe("预定员接班", () => {
 
     assert.equal(reserverQuota(home), 2, "多出来的那个名额正是给已经在路上的接班人留的");
     assert.isUndefined(unassignedReserveTarget(home), "房间已经有人按着了，再派就是白付孵化费");
+  });
+});
+
+describe("预定员补员（双 CLAIM）", () => {
+  class FakePosition {
+    public constructor(public x: number, public y: number, public roomName: string) {}
+  }
+
+  // RCL4 / 1300：两个 CLAIM，净增一，按预定余量补，不按死亡时间
+  const home = {
+    name: "W1N1",
+    controller: { level: 4 },
+    energyCapacityAvailable: 1300,
+    memory: { remotes: ["W1N2"], anchor: { x: 25, y: 25 } }
+  } as unknown as Room;
+
+  function onDuty(ticksToLive: number): void {
+    const creep = {
+      name: `reserver_${ticksToLive}`,
+      memory: { role: "reserver", room: "W1N1", targetRoom: "W1N2" },
+      body: [{ type: "claim" }, { type: "claim" }, { type: "move" }, { type: "move" }],
+      ticksToLive
+    };
+
+    (global as unknown as { Game: { creeps: Record<string, unknown> } }).Game.creeps[creep.name] = creep;
+  }
+
+  let saved: { Game: unknown; Memory: unknown; RoomPosition: unknown };
+  let tick = 2000;
+
+  beforeEach(() => {
+    const context = global as unknown as typeof saved;
+    saved = { Game: context.Game, Memory: context.Memory, RoomPosition: context.RoomPosition };
+
+    context.Game = { creeps: {}, time: tick++ };
+    context.Memory = { rooms: { W1N2: { sources: { s1: { x: 10, y: 10 } }, scouted: 1 } } };
+    context.RoomPosition = FakePosition;
+  });
+
+  afterEach(() => {
+    Object.assign(global, saved);
+  });
+
+  it("没预定就派人去建", () => {
+    assert.equal(reserverQuota(home), 1);
+  });
+
+  it("余量还很厚就不补人，两个 CLAIM 攒下的库存正是用来省孵化费的", () => {
+    // 通勤约 65 + 30 缓冲 = 95；4000 远高于这个门槛
+    Memory.rooms.W1N2.reserveEnds = Game.time + 4000;
+
+    assert.equal(reserverQuota(home), 0);
+    assert.isUndefined(unassignedReserveTarget(home));
+  });
+
+  it("在岗的快死了、但余量还厚，也不提前接班", () => {
+    Memory.rooms.W1N2.reserveEnds = Game.time + 4000;
+    onDuty(50);
+
+    // 人还活着占一个名额，但不会为接班再加一个——死了之后靠余量撑着
+    assert.equal(reserverQuota(home), 1);
+    assert.isUndefined(unassignedReserveTarget(home), "人不死就占着，不派接班");
+  });
+
+  it("人死光了、余量掉到通勤门槛以下才补一个", () => {
+    // 通勤约 65 + 30 = 95，余量 50 撑不到人赶到
+    Memory.rooms.W1N2.reserveEnds = Game.time + 50;
+
+    assert.equal(reserverQuota(home), 1);
+    assert.equal(unassignedReserveTarget(home), "W1N2");
+  });
+
+  it("正在抢别人预定时仍按退休接班：磨预定必须有人持续在场", () => {
+    Memory.rooms.W1N2.unusable = "reserved";
+    onDuty(50);
+
+    assert.equal(reserverQuota(home), 2, "抢预定不能断档，对方预定员一到又补回去");
+    assert.equal(unassignedReserveTarget(home), "W1N2");
   });
 });
 
@@ -343,6 +433,22 @@ describe("遇袭之后的复工", () => {
     Memory.rooms.W1N2 = remoteRoom({ raided, cleared: raided - 500 });
 
     assert.isEmpty(activeRemoteSources(home), "那是上次遇袭之前的旧结论");
+  });
+
+  it("被别人预定的房间采不了，但名单上的会派预定员去抢", () => {
+    // harvest 返回 ERR_NOT_OWNER，矿工派过去白跑——所以不进采集名单。
+    // 但预定员能 attackController 磨掉对方的预定，所以仍在 reserveTargets 里
+    Memory.rooms.W1N2 = remoteRoom({ unusable: "reserved" });
+
+    assert.isEmpty(activeRemoteSources(home), "别人预定的地盘挖不了矿");
+    assert.deepEqual(reserveTargets(home), ["W1N2"], "名单上的 reserved 房间要去抢预定");
+  });
+
+  it("别人占领的房间同样不采，也不派预定员——那不是预定员能搞定的", () => {
+    Memory.rooms.W1N2 = remoteRoom({ unusable: "owned" });
+
+    assert.isEmpty(activeRemoteSources(home));
+    assert.isEmpty(reserveTargets(home));
   });
 });
 

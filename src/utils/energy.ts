@@ -6,7 +6,14 @@
  * 容器里的能量是矿工现成挖好的，取一趟就满，比自己站着挖几十 tick 快得多。
  */
 
-import { claimSupply, isDropped, logisticsOf } from "../managers/logistics";
+import {
+  SUPPLY_PRIORITY,
+  claimSupply,
+  feedingSpawn,
+  hasHaulers,
+  isDropped,
+  logisticsOf
+} from "../managers/logistics";
 import { announce } from "./logger";
 import { travelTo } from "../movement/move";
 
@@ -26,8 +33,31 @@ export function refreshEnergyState(creep: Creep, workAction: string): void {
   }
 }
 
-export function gatherEnergy(creep: Creep): void {
-  const supply = claimSupply(creep, logisticsOf(creep.room).supplies);
+/**
+ * 去拿能量。
+ *
+ * yieldToHauler 表示这个角色愿意让位。触发条件是两条之一：spawn / extension
+ * 还缺货，或房间里有活着的搬运工。让位时既不动矿边容器，也不去源边自己挖。
+ *
+ * 矿边容器是搬运工的收件箱。工人去认领只会按空余容量把供给从物流表里扣掉——
+ * 两个 builder 加三个 upgrader 一认领就是六百多，桶里明明有一百点，搬运工却报
+ * "无货源"。自挖同样得挡住：源的再生固定 10 能量/tick 且已被矿工吃满，工人
+ * 站过去只是从矿工嘴里分走同一份，还可能把源边那三格站位堵死。
+ *
+ * hauler 归零时自动恢复自取和自挖——那种时候没有别的办法。harvester 不让位，
+ * 它只在搬运工断档时才存在，自己挖自己送正是它被造出来的理由。
+ */
+export function gatherEnergy(creep: Creep, yieldToHauler = false): void {
+  const feeding = yieldToHauler && feedingSpawn(creep.room);
+  const yielding = yieldToHauler && (feeding || hasHaulers(creep.room));
+  const { supplies } = logisticsOf(creep.room, creep);
+  const available = yielding ? supplies.filter(entry => entry.priority !== SUPPLY_PRIORITY.source) : supplies;
+
+  let supply = claimSupply(creep, available);
+
+  // 让位不能让到饿死：缓冲桶空了、spawn 那边又不缺货的时候，矿边容器让工人自取。
+  // 让位本是为了别把搬运工的收件箱认领光，可搬运工此刻并不缺这一桶，工人站着才是纯亏。
+  if (!supply && yielding && !feeding) supply = claimSupply(creep, supplies);
 
   if (supply) {
     const result = isDropped(supply) ? creep.pickup(supply) : creep.withdraw(supply, RESOURCE_ENERGY);
@@ -36,6 +66,18 @@ export function gatherEnergy(creep: Creep): void {
     } else {
       delete creep.memory.withdrawFrom;
     }
+    return;
+  }
+
+  if (yielding) {
+    // 手上还有半桶就先去干活，别拿着货站着等——和搬运工"没货可取就先去送"同一个道理
+    if (creep.store[RESOURCE_ENERGY] > 0) {
+      creep.memory.working = true;
+      delete creep.memory.withdrawFrom;
+      return;
+    }
+
+    announce(creep, "让位");
     return;
   }
 

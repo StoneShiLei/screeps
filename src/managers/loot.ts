@@ -25,8 +25,17 @@ import { log } from "../utils/logger";
  */
 const LOOT_TYPES: StructureConstant[] = ["terminal", "storage", "spawn", "tower", "link", "lab", "factory"];
 
-/** 最多派几个搬运工。再多也是排队等着从同一个 terminal 取货 */
-const LOOT_CREW = 4;
+/**
+ * 最多派几个搬运工，取决于家里放不放得下。
+ *
+ * 有 storage 是分水岭。没有它的时候，运回来的能量只能进 spawn、extension 和
+ * 控制器容器，加起来几千点就满了，之后的出口只有升级速度——四个人运回来的货
+ * 大半只能背在身上，等于花四份孵化费雇了四个会走路的仓库。
+ *
+ * 有了 storage 就是一百万容量的坑，运多少都吃得下，这才轮到"多派人多赚"。
+ */
+const LOOT_CREW_WITH_STORAGE = 4;
+const LOOT_CREW_BARE = 2;
 
 /** 少于这么多就不值得再专门派人，剩下的零头让路过的顺手带走 */
 const LOOT_FLOOR = 200;
@@ -49,16 +58,38 @@ export function lootRoom(home: Room): string | undefined {
 }
 
 /**
- * 房间里还有多少可搬的货。
+ * 房间里还有多少**我们拿得动**的货。
  *
  * 有视野就现场数，没视野读上次记下的数——配额要在家里算，而那时候多半
  * 看不见目标房间。
+ *
+ * "拿得动"这个限定是必须的：家里没有 storage 时矿物运回来无处可放，取货那头
+ * 本来就会跳过它。要是这里照总量算，配额就会为了三万点搬不走的矿物一直派人，
+ * 而人到了现场发现无货可取，喊一声"拿不动"就站着——两边口径必须是同一个。
  */
 export function lootLeft(roomName: string): number {
   const room = Game.rooms[roomName];
-  if (room) return lootPiles(room).reduce((sum, pile) => sum + pile.amount, 0);
+  if (room) return takeableIn(room, homeFor(roomName));
 
   return Memory.rooms[roomName]?.lootLeft ?? 0;
+}
+
+/** 这批货归哪个家搬。任务记在家的 Memory 上，所以反查要扫一遍己方房间 */
+function homeFor(target: string): Room | undefined {
+  return Object.values(Game.rooms).find(room => room.controller?.my && room.memory.loot === target);
+}
+
+/** 现场清点拿得动的部分：能量恒算，矿物只在家里有 storage 时算 */
+function takeableIn(room: Room, home: Room | undefined): number {
+  let total = 0;
+
+  for (const pile of lootPiles(room)) {
+    const store = pile.structure.store;
+    total += store[RESOURCE_ENERGY];
+    if (home?.storage) total += (store.getUsedCapacity() ?? 0) - store[RESOURCE_ENERGY];
+  }
+
+  return total;
 }
 
 /**
@@ -106,7 +137,7 @@ export function trackLoot(room: Room): void {
   const memory = Memory.rooms[room.name];
   if (!memory) return;
 
-  const left = lootPiles(room).reduce((sum, pile) => sum + pile.amount, 0);
+  const left = takeableIn(room, homeFor(room.name));
   const previous = memory.lootLeft;
   memory.lootLeft = left;
 
@@ -134,7 +165,8 @@ export function looterQuota(home: Room): number {
   if (left < LOOT_FLOOR) return 0;
 
   const capacity = looterCapacity(home);
-  const wanted = Math.min(LOOT_CREW, Math.max(1, Math.ceil(left / capacity / TRIPS_PER_CREW)));
+  const crew = home.storage ? LOOT_CREW_WITH_STORAGE : LOOT_CREW_BARE;
+  const wanted = Math.min(crew, Math.max(1, Math.ceil(left / capacity / TRIPS_PER_CREW)));
 
   const alive = ourLooters(home).length;
   if (alive >= wanted) return wanted;
@@ -164,6 +196,14 @@ function ourLooters(home: Room): Creep[] {
 export function runLootManager(home: Room): void {
   const target = lootRoom(home);
   if (!target) return;
+
+  // 这个房间已经归我们了，那批货就地留给它自己用。跨房间往老家倒腾没有意义：
+  // 新家正要拿它建 spawn 和 extension，而运一趟的路上损耗全是白付的
+  if (Game.rooms[target]?.controller?.my) {
+    log.info("搬运", `${target} 已经占下来了，剩下的货留给它自己用，${home.name} 收摊`);
+    stopLoot(home);
+    return;
+  }
 
   if (!Game.rooms[target]) return;
   if (lootLeft(target) >= LOOT_FLOOR) return;

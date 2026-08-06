@@ -97,7 +97,7 @@ export function planRoads(room: Room, anchor: Coord): string {
  * bunker 的墙不是密不透风的，布局表在四条边的中段各留了五格路当门。
  * 让外面的路精确接到门上，进出基地才不用绕着围墙走半圈。
  */
-function bunkerEntrances(room: Room, anchor: Coord): RoomPosition[] {
+export function bunkerEntrances(room: Room, anchor: Coord): RoomPosition[] {
   const radius = BUNKER_STRUCTURES.reduce((max, s) => Math.max(max, Math.abs(s.dx), Math.abs(s.dy)), 0);
   const entrances: RoomPosition[] = [];
 

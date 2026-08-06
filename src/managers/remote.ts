@@ -14,7 +14,18 @@ import { announce, log } from "../utils/logger";
 import { bodyFor, maxRepeatFor } from "../utils/body";
 import { commuteTo, travelTo } from "../movement/move";
 import { hostilesIn, intrudersIn } from "../roles/defender";
+import {
+  maintainRemoteSites,
+  planRemoteMiningSpots,
+  planRemoteRoads,
+  unbuiltRemoteContainers,
+  unbuiltRemoteRoads,
+  wornContainer,
+  wornRoad
+} from "../planner/remoteRoads";
+import { ROAD_MIN_LEVEL } from "../planner/roomPlanner";
 import { costMatrixFor } from "../movement/costMatrix";
+import { isRetiring } from "./relief";
 import { planBreach } from "../movement/breach";
 import { worldRange } from "../utils/distance";
 
@@ -25,7 +36,8 @@ import { worldRange } from "../utils/distance";
  * 4 级才有，运回来的能量只能塞进 spawn、extension 和控制器容器，很容易堵。
  * 之所以还是放在 3 级，是因为再早连一个像样的矿工都派不出去。
  */
-const REMOTE_MIN_LEVEL = 3;
+/** 几级才能开外矿；旗子认领也看这个，别让 RCL1 分房把名单抢走 */
+export const REMOTE_MIN_LEVEL = 3;
 
 /**
  * 各等级最多同时开几个外矿房间。
@@ -80,25 +92,11 @@ export const RESERVED_MINER_WORK = 5;
 /**
  * 几级开始派预定员。
  *
- * 三级就能派，因为一个 CLAIM 加一个 MOVE 只要 650 能量，RCL3 造出七个 extension
- * 就够了。净增为零的预定员照样让房间处于"被预定"状态，源容量就是 3000——攒余量
- * 只对换人的空窗有意义，而空窗可以靠提前孵化接班的人来盖。
- *
- * 这也是目前跑得最快的那批 bot 的做法：抢在 RCL3 就把外矿产能翻倍，而不是等到
- * RCL4 才凑得出两个 CLAIM 的大号。
+ * 三级就能派：一个 CLAIM 加一个 MOVE 只要 650，RCL3 造出七个 extension 就够。
+ * 净增为零，靠提前接班盖空窗。RCL4 预算到 1300 就上两个 CLAIM，能攒余量，
+ * 也是抢预定（每 tick 削对方两点）的力气来源。
  */
 const RESERVE_MIN_LEVEL = 3;
-
-/**
- * 提前多少 tick 孵化接班的预定员。
- *
- * 带 CLAIM 的 creep 只活 600 tick，而通勤要花掉一截。等在岗的死了才开始造下一个，
- * 那么整段通勤时间里房间都是没预定的状态；源的容量是在再生那一刻定的，断档正好
- * 撞上再生，那一轮就白少 1500 能量。
- *
- * 余量给到二十 tick：够孵化（五个部件以内）加上几 tick 的能量凑齐时间。
- */
-const RELIEF_MARGIN = 20;
 
 /**
  * 拆一段墙最多值得花几条命。
@@ -149,12 +147,30 @@ export function activeRemoteSources(home: Room): RemoteSource[] {
   return (activeCache.rooms[home.name] ??= collectActive(home));
 }
 
+/**
+ * 这个房间还采不采得。
+ *
+ * `unusable` 记的是侦察时的客观结论，有任何一档都采不了。特别是"被别人预定"：
+ * 游戏规则里 controller 被别的玩家预定时，harvest 直接返回 ERR_NOT_OWNER，矿工
+ * 站在源边也挖不出一点。这种房间不进采集名单，但可以留在外矿名单里派预定员去
+ * 抢预定（attackController 磨掉对方的 ticksToEnd）；磨归零、反手预定成自己的
+ * 之后，这里才会重新放行。
+ */
+function isMinable(memory: RoomMemory): boolean {
+  return !memory.unusable;
+}
+
+/** 名单上正被别人预定、该派预定员去磨的房间 */
+function isContesting(roomName: string): boolean {
+  return Memory.rooms[roomName]?.unusable === "reserved";
+}
+
 function collectActive(home: Room): RemoteSource[] {
   const found: RemoteSource[] = [];
 
   for (const roomName of home.memory.remotes ?? []) {
     const memory = Memory.rooms[roomName];
-    if (!memory || memory.unusable || isCoolingDown(memory) || needsProbe(memory)) continue;
+    if (!memory || !isMinable(memory) || isCoolingDown(memory) || needsProbe(memory)) continue;
 
     for (const [sourceId, spot] of Object.entries(memory.sources ?? {})) {
       found.push({ roomName, sourceId, x: spot.x, y: spot.y });
@@ -204,7 +220,7 @@ function needsProbe(memory: RoomMemory): boolean {
 function probeTarget(home: Room): string | undefined {
   return (home.memory.remotes ?? []).find(roomName => {
     const memory = Memory.rooms[roomName];
-    return memory !== undefined && !memory.unusable && !isCoolingDown(memory) && needsProbe(memory);
+    return memory !== undefined && isMinable(memory) && !isCoolingDown(memory) && needsProbe(memory);
   });
 }
 
@@ -228,18 +244,21 @@ export function isReserved(roomName: string): boolean {
 /**
  * 现在该派预定员去哪些房间。
  *
- * 预定把源容量从 1500 抬回 3000，一个源就多出 5 能量/tick，而预定员摊到寿命上
- * 是 2.2 能量/tick——单源房间也划得来，双源房间等于白捡一倍产出。所以只要够得着
- * 就全预定，不再按房间挑。
+ * 两拨人：已经采得着的外矿（维持/建立自己的预定），以及名单上被别人预定着的
+ * （去 attackController 抢预定）。后者采不了矿，但仍要派人——磨掉对方的预定
+ * 是开矿的前提。控制器被墙圈住的两边都不派，到不了那一格。
  */
 export function reserveTargets(home: Room): string[] {
   if ((home.controller?.level ?? 0) < RESERVE_MIN_LEVEL) return [];
 
-  return [...new Set(activeRemoteSources(home).map(entry => entry.roomName))].filter(
-    // 控制器被墙圈住的房间先不派人。预定员到不了那一格，派过去就是站在墙外
-    // 把 600 tick 的寿命耗光，还白占一个人口名额
-    roomName => !Memory.rooms[roomName]?.breach
-  );
+  const minable = activeRemoteSources(home).map(entry => entry.roomName);
+  const contesting = (home.memory.remotes ?? []).filter(roomName => {
+    if (!isContesting(roomName)) return false;
+    // 遇袭冷却期间别把带 CLAIM 的送去挨打，等清场再说
+    return !isCoolingDown(Memory.rooms[roomName] ?? ({} as RoomMemory));
+  });
+
+  return [...new Set([...minable, ...contesting])].filter(roomName => !Memory.rooms[roomName]?.breach);
 }
 
 /**
@@ -303,60 +322,160 @@ export function dismantlerQuota(home: Room): number {
   return Math.min(breachTargets(home).length, MAX_DISMANTLERS);
 }
 
-/** 还没有预定员认领的房间，孵化时用它决定新人去哪 */
+/** 还没有预定员认领、且现在确实需要人的房间，孵化时用它决定新人去哪 */
 export function unassignedReserveTarget(home: Room): string | undefined {
   const held = heldReserveTargets(home);
-  return reserveTargets(home).find(roomName => !held.has(roomName));
+  const dual = canDualClaim(home);
+
+  return reserveTargets(home).find(roomName => {
+    if (held.has(roomName)) return false;
+    // 双 CLAIM 守自己的预定：余量够撑过通勤就别派，和 reserverQuota 同一条尺
+    if (dual && desiredReservers(home, roomName) === 0) return false;
+    return true;
+  });
 }
 
 /**
  * 要养几个预定员。
  *
- * 每个目标房间一个，再给快退休的那些各留一个名额：它们还活着，还占着人口数，
- * 名额不多留就要等它们死了才开始孵化，而那时候接班的还得走完通勤路。
+ * 单 CLAIM（RCL3，净增为零）：每个目标一个，再给快退休的各留一个接班名额——
+ * 断一 tick 预定就掉，必须赶在前任走完通勤路之前上路。
+ *
+ * 双 CLAIM（RCL4+，净增一）：自己的预定按余量补，不按死亡时间。余量够撑过
+ * 通勤就不派人；掉到"再晚出发就过期"才补一个去顶。正在抢别人预定的房间仍要
+ * 连续有人在场磨，那一档还是按退休接班。
  */
 export function reserverQuota(home: Room): number {
   const targets = reserveTargets(home);
   if (targets.length === 0) return 0;
 
-  return targets.length + retiringReservers(home);
+  if (!canDualClaim(home)) {
+    return targets.length + retiringReservers(home, targets);
+  }
+
+  let wanted = 0;
+  for (const roomName of targets) {
+    wanted += desiredReservers(home, roomName);
+  }
+  return wanted;
 }
 
-/** 还能撑一阵的预定员分别按住了哪个房间。快退休的不算，名额得让给接班的 */
+/** 预算能不能买下两个 CLAIM。一组 claim+move = 650，RCL4 的 1300 正好两个 */
+function canDualClaim(home: Room): boolean {
+  return bodyFor("reserver", home.energyCapacityAvailable).filter(part => part === "claim").length >= 2;
+}
+
+/**
+ * 双 CLAIM 下这个房间要几个预定员。
+ *
+ * 抢预定：必须有人持续 attackController，对方预定员一到又会补回去，所以按退休接班。
+ * 自己的预定：人活着就占一个名额（让他继续把余量顶上去）；人没了才看余量要不要补。
+ */
+function desiredReservers(home: Room, roomName: string): number {
+  const living = reserversFor(home, roomName);
+  const retiring = living.some(creep => isRetiringReserver(creep, home));
+
+  if (isContesting(roomName)) {
+    return 1 + (retiring ? 1 : 0);
+  }
+
+  if (living.length > 0) return 1;
+
+  // 余量还够撑过通勤就先不补——两个 CLAIM 攒下的库存正是用来省掉"一直有人在岗"的
+  return reserveLeft(roomName) <= reserveLeadTime(home, roomName) ? 1 : 0;
+}
+
+/** 从下单孵化到人赶到控制器，大概要预留多少 tick 的预定余量 */
+function reserveLeadTime(home: Room, roomName: string): number {
+  // 体型最多 4 部件 × 3 = 12 tick 孵化，相对通勤可以忽略；留 30 tick 容错
+  return remoteDistance(home, roomName) + 30;
+}
+
+function reserversFor(home: Room, roomName: string): Creep[] {
+  return Object.values(Game.creeps).filter(
+    creep =>
+      creep.memory.role === "reserver" &&
+      creep.memory.room === home.name &&
+      creep.memory.targetRoom === roomName
+  );
+}
+
+/**
+ * 还能撑一阵的预定员分别按住了哪个房间。
+ *
+ * 单 CLAIM / 抢预定：快退休的不算占位，名额让给接班的。
+ * 双 CLAIM 守自己的预定：人不死就占着，不提前派接班——补员看的是预定余量。
+ */
 function heldReserveTargets(home: Room): Set<string> {
   const held = new Set<string>();
+  const dual = canDualClaim(home);
 
   for (const creep of Object.values(Game.creeps)) {
     if (creep.memory.role !== "reserver" || !creep.memory.targetRoom) continue;
-    if (isRetiring(creep, home)) continue;
 
-    held.add(creep.memory.targetRoom);
+    const roomName = creep.memory.targetRoom;
+    if ((!dual || isContesting(roomName)) && isRetiringReserver(creep, home)) continue;
+
+    held.add(roomName);
   }
 
   return held;
 }
 
-function retiringReservers(home: Room): number {
-  return Object.values(Game.creeps).filter(
-    creep => creep.memory.role === "reserver" && creep.memory.room === home.name && isRetiring(creep, home)
-  ).length;
+function retiringReservers(home: Room, targets: string[]): number {
+  const targetSet = new Set(targets);
+  return Object.values(Game.creeps).filter(creep => {
+    if (creep.memory.role !== "reserver" || creep.memory.room !== home.name) return false;
+    if (!creep.memory.targetRoom || !targetSet.has(creep.memory.targetRoom)) return false;
+    return isRetiringReserver(creep, home);
+  }).length;
 }
 
-/** 剩下的寿命只够走完通勤路了，接班的该出发了 */
-function isRetiring(creep: Creep, home: Room): boolean {
+/**
+ * 剩下的寿命只够走完通勤路了，接班的该出发了。
+ *
+ * 判断规则和房内的矿工共用一份（managers/relief），这里只负责算通勤：
+ * 外派人员的岗位在别的房间，只有外矿模块知道那有多远。
+ */
+function isRetiringReserver(creep: Creep, home: Room): boolean {
   const target = creep.memory.targetRoom;
   if (!target) return false;
 
-  const left = creep.ticksToLive;
-  // 还在孵化的没有 ticksToLive，它本身就是刚派出去的那个
-  if (left === undefined) return false;
+  return isRetiring(creep, remoteDistance(home, target));
+}
 
-  // 距离算不出来时一律当它还能干。判成快退休的后果是配额永久多一个名额，
-  // 也就是无休止地孵化预定员，把 spawn 时间全占了
-  const commute = remoteDistance(home, target);
-  if (!Number.isFinite(commute)) return false;
+/**
+ * 需要派人去建/修外矿基础设施（矿边容器和路）的房间。
+ *
+ * 交给拓荒者而不是给运输队挂 WORK，是一笔算得清的账。维护本身极便宜：一格路每
+ * 1000 tick 掉 100 血，一个 WORK 每 tick 修 100 血只花 1 能量，整条四十格的路线
+ * 一千 tick 的衰减也就四十能量。而给运输队挂 WORK 很贵——800 预算下它现在是
+ * 8C8M（400 容量），加一个 WORK 还得补一个 MOVE 才能维持满载全速，预算凑不出来，
+ * 只能退成 1W 6C 7M，运力直接少四分之一。用 25% 的运力换每千 tick 40 能量的维护，
+ * 账是反的。
+ *
+ * 建造更不适合顺手做：一格路 300 点进度，一个 WORK 每 tick 推 5 点，站着 60 tick
+ * 才铺完一格，而那是运输队半个往返。容器同理。
+ *
+ * 拓荒者本来就会跨房间通勤、就地找能量、建造和修理；能量直接吃矿工产出，等于
+ * 外矿自己出钱修自己的路和容器。容器不看老家等级，路仍按 ROAD_MIN_LEVEL 解锁。
+ */
+export function roadCrewTarget(home: Room): string | undefined {
+  const canRoad = (home.controller?.level ?? 0) >= ROAD_MIN_LEVEL;
 
-  return left <= commute + RELIEF_MARGIN;
+  for (const roomName of [...new Set(activeRemoteSources(home).map(entry => entry.roomName))]) {
+    if (isRemotePaused(roomName)) continue;
+
+    // 没视野时看不出铺没铺、磨没磨，等有人过去再说。矿工和运输队一直在那边跑，
+    // 视野不会缺很久
+    const room = Game.rooms[roomName];
+    if (!room) continue;
+
+    if (unbuiltRemoteContainers(room) > 0 || wornContainer(room)) return roomName;
+    if (canRoad && (unbuiltRemoteRoads(room) > 0 || wornRoad(room))) return roomName;
+  }
+
+  return undefined;
 }
 
 /** 还没有矿工认领的外矿源，孵化时用它决定新人去哪 */
@@ -475,24 +594,65 @@ export function runRemoteManager(home: Room): void {
     return;
   }
 
-  remotes.push(candidate);
-  Memory.rooms[candidate].home = home.name;
+  enableRemote(home, candidate);
   log.info("外矿", `${home.name} 启用外矿 ${candidate}`);
 }
 
 /**
- * 把已经不能采的房间踢出名单。
+ * 把房间写进外矿名单，并算好路和矿边容器落点。
  *
- * 别人来占了、来预定了、驻进了 invader core 都算。踢出去之后名额空出来，
- * 下一轮自然会挑别的房间补上。
+ * 旗子 / 控制台手动加外矿也走这里，免得只改了名单却忘了规划。手动那条路越过
+ * 自动挑选的评分，指定一个具体房间——被别人预定的也会收进来（派预定员去抢），
+ * 被别人占领 / keeper / core 那种硬打不过的仍由调用方拒绝。
+ *
+ * 若这个房间原先记在别的家的名单里，先从那边摘掉，避免弱分房抢走旗子之后
+ * 主家再也看不见、两家 memory.home 互相覆盖。
+ */
+export function enableRemote(home: Room, target: string): void {
+  const memory = (Memory.rooms[target] ??= {} as RoomMemory);
+
+  if (memory.home && memory.home !== home.name) {
+    const previous = Game.rooms[memory.home]?.memory.remotes;
+    const index = previous?.indexOf(target) ?? -1;
+    if (previous && index >= 0) previous.splice(index, 1);
+  }
+
+  const remotes = (home.memory.remotes ??= []);
+  if (!remotes.includes(target)) remotes.push(target);
+
+  memory.home = home.name;
+
+  // 路线和落点现在就算好存着。跨房间寻路要两万 ops，只在启用这一下跑一次；
+  // 容器落点要紧挨着路面，所以路先算
+  planRemoteRoads(home, target);
+  planRemoteMiningSpots(home, target);
+}
+
+/**
+ * 把已经不能采、也不值得抢的房间踢出名单。
+ *
+ * 别人占领、驻进 invader core、没有源、Source Keeper 房间——这些踢出去腾名额。
+ * 被别人预定的留下：那是抢预定的目标，预定员会去 attackController 磨，磨归零
+ * 再反手预定，采得着之后自然回到正常外矿流程。
+ *
+ * 自己占下来也要踢——而且这一条只能在这里判。定期复查（surveyRoom）只对
+ * 没有归属的房间跑，房间一旦归了自己，主循环就不再把它当外矿看，那份记录
+ * 于是永远停在"可用"上：预定员被一趟趟派去预定自己的控制器，运输队还在把
+ * 自家的能量当外矿往回搬。
  */
 function dropUnusable(home: Room, remotes: string[]): void {
   for (let i = remotes.length - 1; i >= 0; i--) {
-    const memory = Memory.rooms[remotes[i]];
-    if (memory && !memory.unusable) continue;
+    const roomName = remotes[i];
+    const memory = Memory.rooms[roomName];
+    const mine = Game.rooms[roomName]?.controller?.my === true;
 
-    log.warn("外矿", `${home.name} 放弃外矿 ${remotes[i]}：${memory?.unusable ?? "没有记录"}`);
-    delete Memory.rooms[remotes[i]]?.home;
+    // 采得着，或者正在被别人预定（留着抢）——都留在名单里
+    const keep = !mine && memory && (isMinable(memory) || memory.unusable === "reserved");
+    if (keep) continue;
+
+    const reason = mine ? "已经占下来了，它自己就是个家" : (memory?.unusable ?? "没有记录");
+    log.info("外矿", `${home.name} 放弃外矿 ${roomName}：${reason}`);
+    delete Memory.rooms[roomName]?.home;
     remotes.splice(i, 1);
   }
 }
@@ -509,6 +669,8 @@ function bestCandidate(home: Room, remotes: string[]): string | undefined {
 
   for (const roomName of Object.values(Game.map.describeExits(home.name) ?? {})) {
     if (!roomName || remotes.includes(roomName)) continue;
+    // 自己的房间不是外矿，它有自己的矿工和搬运工
+    if (Game.rooms[roomName]?.controller?.my) continue;
 
     const memory = Memory.rooms[roomName];
     if (!memory?.scouted || memory.unusable) continue;
@@ -620,6 +782,16 @@ export function watchRemote(room: Room): void {
 
   trackReservation(room, memory);
 
+  // 趁有人在场把容器和路面工地补上。房间不归我们，runRoomPlanner 不管它
+  const home = Game.rooms[memory.home];
+  if (home) {
+    // 旧外矿可能只有路没有落点：有视野时补算一次
+    if (!room.memory.miningSpots && room.memory.sources) {
+      planRemoteMiningSpots(home, room.name);
+    }
+    maintainRemoteSites(room, home.controller?.level ?? 0, ROAD_MIN_LEVEL);
+  }
+
   // 归属变化和 invader core 进驻都不是急事，隔一阵子复查一次就够
   if (Game.time % WATCH_INTERVAL === 0) {
     surveyRoom(room);
@@ -721,7 +893,8 @@ function judge(room: Room, sources: Record<string, unknown>): RoomMemory["unusab
   const controller = room.controller;
   if (controller?.owner && !controller.my) return "owned";
 
-  // 别人预定的房间照采是能采，但那是明摆着抢，而且他的 creep 就在旁边
+  // 别人预定时 harvest 返回 ERR_NOT_OWNER，采不了；记成 reserved 让采集名单绕开，
+  // 但手动加进外矿名单的会派预定员去抢（attackController），不在这里直接放弃
   if (controller?.reservation && controller.reservation.username !== username()) return "reserved";
 
   return undefined;

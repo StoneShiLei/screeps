@@ -22,12 +22,13 @@ import {
 } from "../utils/settings";
 import { cancelExpansion, expansionStatus, startExpansion } from "../managers/expansion";
 import { cleanupCreepMemory, cleanupRoomMemory } from "../utils/memory";
-import { isRemotePaused, reserveLeft } from "../managers/remote";
+import { enableRemote, isRemotePaused, reserveLeft } from "../managers/remote";
 import { loadByRole, spawnLoadOf } from "../managers/spawnLoad";
 import { lootPiles, lootStatus, startLoot, stopLoot } from "../managers/loot";
+import { flagHelpText } from "../managers/flags";
 import { logisticsOf } from "../managers/logistics";
 import { planRoom } from "../planner/roomPlanner";
-import { roomPopulation } from "../managers/spawnManager";
+import { spawnQueue } from "../managers/spawnManager";
 
 export interface Command {
   usage: string;
@@ -44,6 +45,11 @@ export const COMMANDS: Record<string, Command> = {
     usage: "help()",
     describe: "列出全部命令和用法",
     run: () => helpText()
+  },
+  flaghelp: {
+    usage: "flaghelp()",
+    describe: "列出可以用旗子下达的任务",
+    run: () => flagHelpText()
   },
   "debug.on": {
     usage: "debug.on(module)",
@@ -116,16 +122,18 @@ export const COMMANDS: Record<string, Command> = {
   },
   quota: {
     usage: "quota(room?)",
-    describe: "查看各角色配额与实到人数",
+    describe: "按孵化优先级查看配额与缺口（★ = 下一个造谁）",
     run: roomName => {
       const room = resolveRoom(roomName);
       if (typeof room === "string") return room;
 
-      const { counts, quota } = roomPopulation(room);
-      const lines = (Object.keys(quota) as CreepRole[]).map(
-        role => `  ${role.padEnd(10)} ${counts[role]}/${quota[role]}`
-      );
-      return `${room.name} 人口\n${lines.join("\n")}`;
+      const { next, slots } = spawnQueue(room);
+      const lines = slots.map(slot => {
+        const mark = slot.role === next ? "★" : " ";
+        const gap = slot.deficit > 0 ? `  缺${slot.deficit}` : "";
+        return ` ${mark}${slot.role.padEnd(12)} ${slot.count}/${slot.quota}${gap}`;
+      });
+      return `${room.name} 孵化队列${next ? `（下一个 ${next}）` : "（满编）"}\n${lines.join("\n")}`;
     }
   },
   load: {
@@ -148,7 +156,7 @@ export const COMMANDS: Record<string, Command> = {
   },
   "remote.add": {
     usage: "remote.add(target, room?)",
-    describe: "手动把某个房间加进外矿名单",
+    describe: "手动把房间加进外矿名单（被别人预定的会去抢预定；被占领的加不了）",
     run: (target, roomName) => {
       if (!target) return "用法：remote.add(target, room?)";
 
@@ -157,14 +165,21 @@ export const COMMANDS: Record<string, Command> = {
 
       const memory = Memory.rooms[target];
       if (!memory?.scouted) return `${target} 还没侦察过，等 scout 去过再加`;
-      if (memory.unusable) return `${target} 不可用：${memory.unusable}`;
+      // reserved 放行去抢；owned / keeper / core / none 那种预定员搞不定的拒绝
+      if (memory.unusable && memory.unusable !== "reserved") {
+        return `${target} 采不了：${memory.unusable}`;
+      }
 
-      const remotes = (room.memory.remotes ??= []);
-      if (remotes.includes(target)) return `${target} 已经在名单里`;
+      const remotes = room.memory.remotes ?? [];
+      if (remotes.includes(target) && memory.home === room.name) {
+        return memory.unusable === "reserved" ? `${target} 已经在名单里（抢预定中）` : `${target} 已经在名单里`;
+      }
 
-      remotes.push(target);
-      memory.home = room.name;
-      return `${room.name} 外矿名单 → ${remotes.join(" ")}`;
+      enableRemote(room, target);
+      const list = (room.memory.remotes ?? []).join(" ");
+      return memory.unusable === "reserved"
+        ? `${room.name} 外矿名单 → ${list}（${target} 被别人预定，派预定员去抢）`
+        : `${room.name} 外矿名单 → ${list}`;
     }
   },
   "remote.drop": {
@@ -334,10 +349,15 @@ function remoteText(room: Room): string {
   for (const name of remotes) {
     const memory = Memory.rooms[name];
     const count = Object.keys(memory?.sources ?? {}).length;
-    const state = isRemotePaused(name) ? "遇袭冷却中" : "采集中";
+    const contesting = memory?.unusable === "reserved";
+    const state = isRemotePaused(name) ? "遇袭冷却中" : contesting ? "抢预定中" : "采集中";
     const left = reserveLeft(name);
     // 容量写出来是因为这直接决定了矿工体型和运输队人数
-    const reserve = left > 0 ? `已预定 剩 ${left} tick 源 3000 容量` : "未预定 源 1500 容量";
+    const reserve = contesting
+      ? "对方预定着，采不了"
+      : left > 0
+        ? `已预定 剩 ${left} tick 源 3000 容量`
+        : "未预定 源 1500 容量";
     lines.push(`  ${name} 源 ${count} 个 ${state} ${reserve}`);
 
     const breach = memory?.breach;
@@ -384,6 +404,7 @@ export function installCommands(): void {
   const g: any = global;
 
   g.help = () => COMMANDS.help.run();
+  g.flaghelp = () => COMMANDS.flaghelp.run();
   g.debug = {
     on: (module: string) => COMMANDS["debug.on"].run(module),
     off: (module: string) => COMMANDS["debug.off"].run(module),
@@ -462,6 +483,7 @@ function isCreepRole(value: string): value is CreepRole {
     "miner",
     "hauler",
     "defender",
+    "guardian",
     "scout",
     "remoteMiner",
     "remoteHauler",

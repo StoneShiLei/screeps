@@ -9,18 +9,31 @@
 import {
   LogisticsEntry,
   SUPPLY_PRIORITY,
+  bufferDemandPriority,
   claimDemand,
   claimSupply,
   isDropped,
   logisticsOf
 } from "../managers/logistics";
 import { announce } from "../utils/logger";
+import { holdPosition } from "../movement/traffic";
 import { travelTo } from "../movement/move";
 
-/** 自己不采集、靠别人供能的角色，闲下来的运力优先喂它们 */
-const FEED_ROLES: CreepRole[] = ["builder", "upgrader"];
+/**
+ * 闲下来的运力优先喂这些角色。
+ *
+ * pioneer 也在内：老家派去扶持分房的拓荒者，人就站在分房里、是 my creep，分房
+ * 自己的搬运工却不认它，于是它只能自己跑去挖矿捡货，一半时间耗在找饭上——扶持
+ * 的意义正是让它专心建 spawn/extension 和升级，把能量喂到嘴边才划算。它在外矿
+ * 铺路时那边没有搬运工，照旧自给，不受影响。
+ */
+const FEED_ROLES: CreepRole[] = ["builder", "upgrader", "pioneer"];
 
-/** 超过这个距离就不值得专门跑一趟去喂 */
+/**
+ * 超过这个距离就不值得专门跑一趟去喂。
+ *
+ * 只在建筑需求都清掉之后才走投喂。绝不能反过来让投喂压过 extension。
+ */
 const FEED_RANGE = 5;
 
 export function runHauler(creep: Creep): void {
@@ -54,7 +67,9 @@ function updateState(creep: Creep): void {
 function deliver(creep: Creep): void {
   const target = resolveDelivery(creep) ?? nearbyWorker(creep);
   if (!target) {
+    // 钉住：没意图的 creep 会被交通层推来推去，看起来像来回晃
     announce(creep, "待命");
+    holdPosition(creep);
     return;
   }
 
@@ -62,13 +77,13 @@ function deliver(creep: Creep): void {
   if (result === ERR_NOT_IN_RANGE) {
     travelTo(creep, target, { visualizePathStyle: { stroke: "#ffffff" } });
   } else {
-    // 不管是送完了还是目标满了，都重新挑一个，别在原地耗着
+    // 送完或目标满了：清掉认领，下一 tick 重新挑（可能同目标继续补）
     delete creep.memory.deliverTo;
   }
 }
 
 function pickUp(creep: Creep): void {
-  const target = claimSupply(creep, availableSupplies(creep.room));
+  const target = claimSupply(creep, availableSupplies(creep));
 
   if (!target) {
     // 没货可取但身上有存货时改去送货，免得半满的 hauler 一直闲着
@@ -77,6 +92,7 @@ function pickUp(creep: Creep): void {
       delete creep.memory.withdrawFrom;
     } else {
       announce(creep, "无货源");
+      holdPosition(creep);
     }
     return;
   }
@@ -89,20 +105,22 @@ function pickUp(creep: Creep): void {
   }
 }
 
-/** 排除刚取货的地方，否则从 storage 取了又原样送回去，来回空转 */
+/**
+ * 挑送货目标。
+ *
+ * logisticsOf 传入自己：扣减在途量时跳过本 creep，否则自己的货会把目标
+ * 从需求表里扣没，claimDemand 每 tick 换一个新目标。
+ */
 function resolveDelivery(creep: Creep): AnyStoreStructure | null {
-  const candidates = logisticsOf(creep.room).demands.filter(entry => entry.id !== creep.memory.withdrawFrom);
+  const { demands } = logisticsOf(creep.room, creep);
+  const candidates = demands.filter(entry => entry.id !== creep.memory.withdrawFrom);
   return claimDemand(creep, candidates);
 }
 
 /**
- * 建筑都填满了，就近喂给缺能量的工人。
+ * 建筑都填够了，就近喂给缺能量的工人。
  *
- * 满载待命本身不亏，hauler 身上的能量不蒸发，等于一个会走路的仓库。亏的是
- * builder 明明站在旁边，却还要丢下工地跑十几步去矿边取货。
- *
- * 只喂近处的：追着满房间跑，路上耗掉的时间比省下的还多，而且会把 hauler
- * 从 spawn 附近拽走，extension 一空就没人及时补。
+ * 只喂近处的：追着满房间跑会把 hauler 从 spawn 附近拽走。
  */
 function nearbyWorker(creep: Creep): Creep | null {
   return creep.pos.findClosestByRange(FIND_MY_CREEPS, {
@@ -116,12 +134,19 @@ function nearbyWorker(creep: Creep): Creep | null {
 /**
  * 没有任何需求的时候只捡会消失和会溢出的那些货。
  *
- * 否则 hauler 会把 storage 里的能量搬到自己身上原地站着——库存从仓库
- * 挪到 creep 身上，一点用没有，还占着路。
+ * 否则 hauler 会把 storage 里的能量搬到自己身上原地站着。
  */
-function availableSupplies(room: Room): LogisticsEntry[] {
-  const { supplies, demands } = logisticsOf(room);
-  if (demands.length > 0) return supplies;
+function availableSupplies(creep: Creep): LogisticsEntry[] {
+  const { supplies, demands } = logisticsOf(creep.room, creep);
 
-  return supplies.filter(entry => entry.priority <= SUPPLY_PRIORITY.source);
+  // 缓冲桶是工人的粮仓，只有出现比它更急的去处（spawn / tower）才值得掏。
+  // 否则搬运工会把桶里的货取出来又送回桶里，白转一圈还把工人的饭端走。
+  const sites = creep.room.find(FIND_MY_CONSTRUCTION_SITES).length;
+  const bufferPriority = bufferDemandPriority(sites);
+  const urgent = demands.some(entry => entry.priority < bufferPriority);
+  const usable = urgent ? supplies : supplies.filter(entry => entry.priority !== SUPPLY_PRIORITY.buffer);
+
+  if (demands.length > 0) return usable;
+
+  return usable.filter(entry => entry.priority <= SUPPLY_PRIORITY.source);
 }

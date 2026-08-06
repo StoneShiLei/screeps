@@ -1,12 +1,12 @@
 /**
- * remoteHauler：往邻房跑长途，把矿工丢在地上的能量搬回基地。
+ * remoteHauler：往邻房跑长途，把矿边容器（或地上）的能量搬回基地。
  *
  * 和家里的 hauler 是两种活。家里那个每交一次货就重新问"现在哪里最缺"，因为
  * 它的行程只有十几格，改主意几乎不要钱；这个单程六七十格，中途换主意的代价
  * 是几十 tick 的空跑，所以它认死一个外矿房间，装满就回家、卸完就再去。
  *
- * 认房间而不认某一堆能量：地上的能量堆随矿工的产出不断出现和消失，绑定具体
- * 目标只会一路上反复重算。
+ * 取货走物流表：容器建好之后矿边桶会出现在供给表里，地上的散货优先级更高，
+ * 过渡期两种来源都能捡，不必单独写一套外矿取货逻辑。
  */
 
 import { activeRemoteSources, commuteOrFlee } from "../managers/remote";
@@ -51,7 +51,7 @@ function collect(creep: Creep): void {
 
   if (commuteOrFlee(creep, roomName)) return;
 
-  const target = claimSupply(creep, logisticsOf(creep.room).supplies);
+  const target = claimSupply(creep, logisticsOf(creep.room, creep).supplies);
   if (!target) {
     // 空手等下一批比空手回家划算：来回一趟几十 tick，矿工每 tick 都在产出
     if (creep.store[RESOURCE_ENERGY] > 0) {
@@ -86,7 +86,7 @@ function deliver(creep: Creep): void {
     return;
   }
 
-  const target = claimDemand(creep, logisticsOf(home).demands);
+  const target = claimDemand(creep, logisticsOf(home, creep).demands);
   if (!target) {
     announce(creep, "无处卸");
     return;

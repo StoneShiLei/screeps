@@ -5,6 +5,10 @@
  * 300 tick 再生，也就是 5 能量/tick；预定之后恢复到 3000，产能整整翻倍。一个源
  * 白得 5 能量/tick，而预定员摊到寿命上才 1.1——单源房间也划得来，双源等于白捡。
  *
+ * 能预定就预定，不能预定就抢：被别人预定的控制器 reserveController 会返回
+ * ERR_INVALID_TARGET，这时改用 attackController——每 CLAIM 每 tick 削 1 点对方的
+ * 预定时长，磨到归零房间就回中立，下一 tick 就能反手预定成自己的，源也就采得了。
+ *
  * 带 CLAIM 的 creep 寿命只有 600 tick，不到普通 creep 的一半，而且没法用 spawn
  * 续命，所以它注定是个反复重造的消耗品。这笔账已经算进上面那个 1.1 里了。
  */
@@ -13,6 +17,15 @@ import { announce, log } from "../utils/logger";
 import { commuteOrFlee, reserveTargets, unassignedReserveTarget } from "../managers/remote";
 import { holdPosition } from "../movement/traffic";
 import { travelTo } from "../movement/move";
+
+/** 控制器正被别人（不是自己）预定着——这时候只能 attackController，reserve 会失败 */
+function reservedByOther(controller: StructureController): boolean {
+  const reservation = controller.reservation;
+  if (!reservation) return false;
+
+  const mine = Object.values(Game.spawns)[0]?.owner.username;
+  return reservation.username !== mine;
+}
 
 export function runReserver(creep: Creep): void {
   const roomName = resolveTarget(creep);
@@ -29,20 +42,35 @@ export function runReserver(creep: Creep): void {
   const controller = creep.room.controller;
   if (!controller) return;
 
+  // 这个房间已经归我们了。预定自己的房间是无效操作，而且再没有必要——
+  // 归属本身就把源的容量抬到了 3000
+  if (controller.my) {
+    log.info("外矿", `${creep.room.name} 已经是自己的房间，不用预定了`);
+    creep.suicide();
+    return;
+  }
+
   if (!creep.pos.isNearTo(controller)) {
     travelTo(creep, controller, { range: 1, visualizePathStyle: { stroke: "#aa66ff" } });
     return;
   }
 
-  // 到位就钉住。预定每 tick 都要重新调用一次，被挤开一格就断一 tick 的续期
+  // 到位就钉住。预定/抢预定每 tick 都要重新调用一次，被挤开一格就断一 tick
   holdPosition(creep);
-  announce(creep, "预定");
 
-  const result = creep.reserveController(controller);
-  if (result === ERR_INVALID_TARGET) {
-    // 被别人抢先占了或者预定了。定期复查会把这个房间踢出名单，这里只管说一声
-    log.warn("外矿", `${creep.room.name} 的控制器预定不了，已被别人占住`);
+  // 被别人预定着就先磨掉他的预定；磨空（或本就中立/自己）再正常预定
+  if (reservedByOther(controller)) {
+    announce(creep, "抢预定");
+    const result = creep.attackController(controller);
+    if (result === ERR_INVALID_TARGET) {
+      // 已经被人 claim 成 owned 了，光靠预定员抢不动，交给复查把它踢出名单
+      log.warn("外矿", `${creep.room.name} 的控制器已被别人占领，抢不了，放弃`);
+    }
+    return;
   }
+
+  announce(creep, "预定");
+  creep.reserveController(controller);
 }
 
 function retire(creep: Creep): void {

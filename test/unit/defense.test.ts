@@ -1,7 +1,7 @@
 import { assert } from "chai";
 import { bodyCost, bodyFor } from "../../src/utils/body";
-import { hostilesIn, intrudersIn } from "../../src/roles/defender";
-import { chooseTowerAction } from "../../src/managers/tower";
+import { defendersNeeded, hostilesIn, intrudersIn, localDefenderCount, runDefender, stillArmed } from "../../src/roles/defender";
+import { chooseTowerAction, rampartHitsTarget } from "../../src/managers/tower";
 import { installGameConstants } from "./mock";
 
 function countPart(body: BodyPartConstant[], part: BodyPartConstant): number {
@@ -86,6 +86,133 @@ describe("敌人和竞争者", () => {
   });
 });
 
+describe("按战力派兵", () => {
+  /** 只关心身体部件的假敌人：战力折算就看它带了几个能出手的部件 */
+  function foe(parts: BodyPartConstant[]): Creep {
+    return { body: parts.map(type => ({ type })) } as unknown as Creep;
+  }
+
+  it("没敌人就一个不派", () => {
+    assert.equal(defendersNeeded([], 1300), 0);
+  });
+
+  it("一堆小体型敌人一个满编兵就够，不照人头 1v1", () => {
+    // 1300 预算的 defender 有 10 个 ATTACK，三个各带 1 攻的杂兵总战力才 3
+    const swarm = [foe(["attack", "move"]), foe(["attack", "move"]), foe(["attack", "move"])];
+
+    assert.equal(defendersNeeded(swarm, 1300), 1, "一个兵抵三个小兵，派三个是浪费两个");
+  });
+
+  it("敌人体量够大才多派，按战力比例上去", () => {
+    // 我方一个兵 10 攻；对面两个各 15 攻，总战力 30，要三个兵才压得过
+    const heavy = [foe(new Array(15).fill("attack")), foe(new Array(15).fill("attack"))];
+
+    assert.equal(defendersNeeded(heavy, 1300), 3);
+  });
+
+  it("敌人带治疗就再加一个，靠集火压过它的回血", () => {
+    // 5 攻 3 奶，战力 8，除以 10 是一个兵；治疗那一个是集火余量
+    const healed = [foe([...new Array(5).fill("attack"), "heal", "heal", "heal"])];
+
+    assert.equal(defendersNeeded(healed, 1300), 2);
+  });
+
+  it("兵造得小的时候（预算低）该派的头数会相应变多", () => {
+    // 300 预算的 defender 只有 2 个 ATTACK，对上 6 攻的敌人就要三个兵
+    const enemy = [foe(new Array(6).fill("attack"))];
+
+    assert.equal(defendersNeeded(enemy, 300), 3);
+  });
+});
+
+describe("本土早期防御兵只打 NPC", () => {
+  /** 带归属的假敌人：默认系统入侵者，玩家传别的用户名 */
+  function foe(parts: BodyPartConstant[], username = "Invader"): Creep {
+    return { body: parts.map(type => ({ type })), owner: { username } } as unknown as Creep;
+  }
+
+  it("没敌人就一个不派", () => {
+    assert.equal(localDefenderCount([], 1300, 3), 0);
+  });
+
+  it("NPC 入侵者按战力少孵，一个满编兵扫一群杂兵", () => {
+    const swarm = [foe(["attack", "move"]), foe(["attack", "move"]), foe(["attack", "move"])];
+
+    assert.equal(localDefenderCount(swarm, 1300, 3), 1, "三个小 NPC 一个满编兵就够");
+  });
+
+  it("敌对玩家来袭一个地面兵都不孵，那种仗交给塔和 rampart", () => {
+    const raiders = [foe(["attack", "move"], "Napoleon"), foe(["attack", "move"], "Napoleon")];
+
+    assert.equal(localDefenderCount(raiders, 1300, 3), 0, "地面兵打不过玩家，硬孵只会把能量喂掉、拖进死循环");
+  });
+
+  it("NPC 里混进一个玩家也不孵：有玩家就是打不过的仗", () => {
+    const mixed = [foe(["attack", "move"]), foe(["attack", "move"], "Napoleon")];
+
+    assert.equal(localDefenderCount(mixed, 1300, 3), 0);
+  });
+
+  it("大波 NPC 按战力超了上限，也只封在上限", () => {
+    const horde = [foe(new Array(20).fill("attack")), foe(new Array(20).fill("attack"))];
+
+    assert.equal(localDefenderCount(horde, 1300, 3), 3);
+  });
+});
+
+describe("缴械的防御兵退场", () => {
+  /** 身上带一组部件，attackHits=0 表示攻击件被啃光 */
+  function body(parts: { type: BodyPartConstant; hits: number }[]): Creep {
+    let dead = false;
+    return {
+      body: parts,
+      memory: {},
+      suicide: () => {
+        dead = true;
+        return OK;
+      },
+      say: () => OK,
+      get dead() {
+        return dead;
+      }
+    } as unknown as Creep & { dead: boolean };
+  }
+
+  it("还有能出手的部件就算武装", () => {
+    const creep = body([
+      { type: "tough", hits: 0 },
+      { type: "attack", hits: 100 },
+      { type: "move", hits: 100 }
+    ]);
+
+    assert.isTrue(stillArmed(creep));
+  });
+
+  it("攻击件被打光（hits 归零）就不算武装", () => {
+    const creep = body([
+      { type: "tough", hits: 0 },
+      { type: "attack", hits: 0 },
+      { type: "move", hits: 100 }
+    ]);
+
+    assert.isFalse(stillArmed(creep));
+  });
+
+  it("缴械的防御兵自尽腾编制，好让 spawn 补个满编的", () => {
+    const creep = body([
+      { type: "attack", hits: 0 },
+      { type: "move", hits: 100 }
+    ]) as Creep & { dead: boolean; room: Room };
+    creep.room = { find: () => [] } as unknown as Room;
+    (global as unknown as { Game: { time: number; creeps: unknown }; Memory: unknown }).Game = { time: 1, creeps: {} };
+    (global as unknown as { Memory: unknown }).Memory = { settings: {} };
+
+    runDefender(creep);
+
+    assert.isTrue(creep.dead, "没治疗、打不动人还赖着，应该自尽");
+  });
+});
+
 describe("塔的目标选择", () => {
   it("有敌人就开火，其它一概不管", () => {
     const action = chooseTowerAction(FULL, {
@@ -131,6 +258,31 @@ describe("塔的目标选择", () => {
 
     assert.equal(action.kind, "repair");
     assert.strictEqual(action.kind === "repair" && action.target, worst);
+  });
+
+  it("rampart 按软上限算残血，不会因为 hitsMax 三亿永远压过别的建筑", () => {
+    const road = wall(21, 21, 1000, 5000);
+    road.structureType = "road";
+    const rampart = wall(20, 20, 9_000, 300_000_000);
+    rampart.structureType = "rampart";
+    rampart.room = { controller: { level: 3 } } as Room;
+
+    // 软上限 10000，rampart 已到 90%；路只有 20%。该修路
+    const action = chooseTowerAction(FULL, {
+      hostiles: [],
+      wounded: [],
+      damaged: [rampart, road]
+    });
+
+    assert.equal(action.kind, "repair");
+    assert.strictEqual(action.kind === "repair" && action.target, road);
+  });
+
+  it("rampart 血量目标随等级抬，但不冲着三亿天花板", () => {
+    assert.equal(rampartHitsTarget(4), 10_000);
+    assert.equal(rampartHitsTarget(5), 50_000);
+    assert.equal(rampartHitsTarget(6), 100_000);
+    assert.isBelow(rampartHitsTarget(8), 1_000_000);
   });
 
   it("能量低于警戒线就不修了，攒着应急", () => {
@@ -206,5 +358,17 @@ describe("防御兵体型", () => {
 
     assert.isAtMost(body.length, 50);
     assert.isAtMost(bodyCost(body), 12900);
+  });
+
+  it("协防兵零头买 MOVE 不买 TOUGH：跨房赶路 1t/格，别被血包拖成 2t", () => {
+    // 除不尽一组（130）的预算最容易掉进"零头全买 TOUGH"的坑，逐档扫一遍
+    for (let budget = 400; budget <= 1300; budget += 70) {
+      const body = bodyFor("guardian", budget);
+      const movers = countPart(body, "move");
+      const others = body.length - movers;
+
+      assert.notInclude(body, "tough", `预算 ${budget} 的协防兵不该带 TOUGH，那会把它拖慢`);
+      assert.isAtLeast(movers, others, `预算 ${budget} 的协防兵 MOVE 不够拖动身子，平地上要 2t 才动一格`);
+    }
   });
 });

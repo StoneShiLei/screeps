@@ -9,8 +9,12 @@
  */
 
 import { gatherEnergy, refreshEnergyState } from "utils/energy";
+import { announce } from "../utils/logger";
 import { containerAt } from "../utils/structures";
+import { hasCoreBuildPending } from "../planner/roomPlanner";
+import { hasHaulers } from "../managers/logistics";
 import { holdPosition } from "../movement/traffic";
+import { needsDowngradeShield } from "../utils/controller";
 import { travelTo } from "../movement/move";
 
 /**
@@ -19,13 +23,23 @@ import { travelTo } from "../movement/move";
  * 数量级来自搬运工的往返周期：从矿边到控制器一个来回大致就是这么久，
  * 短暂断货是正常波动，为此跑一趟矿区，回来的路上容器早又满了，两头耽误。
  * 但要是物流真断了（搬运工全死、矿工停工），死等就是白白耗掉一条命，
- * 所以得留这个出口。
+ * 所以得留这个出口——只在房间没有搬运工时启用。有 hauler 时出门也碰不了
+ * 矿边桶，来回几十 tick 纯亏，回来粮仓早又填上了。
  */
 const IDLE_TOLERANCE = 20;
 
 export function runUpgrader(creep: Creep): void {
   const controller = creep.room.controller;
   if (!controller) return;
+
+  // 本级核心建筑还没铺完：升级工停手把能量留给建造，除非快掉级了才顶一下。
+  // 配额那边已经不再补人，这里管的是还活着的那几个别继续烧能量。
+  if (shouldYieldToBuild(creep.room)) {
+    releaseStation(creep);
+    holdPosition(creep);
+    announce(creep, "等建");
+    return;
+  }
 
   const spot = creep.room.memory.upgradeSpot;
   const container = spot ? containerAt(creep.room, spot.x, spot.y) : undefined;
@@ -42,14 +56,27 @@ export function runUpgrader(creep: Creep): void {
   if (creep.memory.working) {
     moveAndUpgrade(creep, controller);
   } else {
-    gatherEnergy(creep);
+    // 和 builder 同一条让位规则：控制器有两万 tick 的降级余量，extension 一空
+    // 房间当场就孵不出人
+    gatherEnergy(creep, true);
   }
+}
+
+/** 建造优先：有核心建筑任务、又还没到掉级警戒线 */
+function shouldYieldToBuild(room: Room): boolean {
+  if (needsDowngradeShield(room)) return false;
+  if (room.controller?.level === 8) return false;
+
+  return (
+    room.find(FIND_MY_CONSTRUCTION_SITES).length > 0 || hasCoreBuildPending(room)
+  );
 }
 
 /**
  * 容器空了多久，久到该出门了没有。
  *
  * 只要还能拿到能量就把计数清零，所以"断断续续有货"不会累积成放弃。
+ * 有搬运工时永远不放弃——出去也不许碰矿边桶，原地等粮仓回填更划算。
  */
 function hasGivenUp(creep: Creep, container: StructureContainer): boolean {
   const hasEnergy = container.store[RESOURCE_ENERGY] > 0 || creep.store[RESOURCE_ENERGY] > 0;
@@ -60,6 +87,12 @@ function hasGivenUp(creep: Creep, container: StructureContainer): boolean {
   }
 
   creep.memory.idleTicks = (creep.memory.idleTicks ?? 0) + 1;
+
+  if (hasHaulers(creep.room)) {
+    announce(creep, "等粮");
+    return false;
+  }
+
   return creep.memory.idleTicks > IDLE_TOLERANCE;
 }
 
@@ -71,6 +104,11 @@ function hasGivenUp(creep: Creep, container: StructureContainer): boolean {
  * 站定之后再也不用挪窝。
  */
 function upgradeFromContainer(creep: Creep, controller: StructureController, container: StructureContainer): void {
+  // 上一轮跑腿时认领的货得撒手。物流系统按认领扣在途量，而静态升级根本不会去取那份
+  // 货——留着就等于永久替它占位：矿边容器里只剩一百来点时，这一扣足以让整条供给从
+  // 供给表里消失，搬运工于是报"无货源"，站在有货的容器旁边不动
+  delete creep.memory.withdrawFrom;
+
   const station = claimStation(creep);
 
   if (station && (creep.pos.x !== station.x || creep.pos.y !== station.y)) {

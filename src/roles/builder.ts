@@ -15,7 +15,9 @@ export function runBuilder(creep: Creep): void {
   if (creep.memory.working) {
     buildOrFallBack(creep);
   } else {
-    gatherEnergy(creep);
+    // 工地什么时候建完都不影响房间存亡，spawn 和 extension 空着却会让补人直接断掉，
+    // 所以缺口期间让开矿边容器
+    gatherEnergy(creep, true);
   }
 }
 
