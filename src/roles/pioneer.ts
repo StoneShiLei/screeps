@@ -16,11 +16,12 @@
 
 import { announce, log } from "../utils/logger";
 import { commuteTo, travelTo } from "../movement/move";
+import { wornContainer, wornRoad } from "../planner/remoteRoads";
 import { commuteOrFlee } from "../managers/remote";
+import { containerAt } from "../utils/structures";
 import { demolitionTarget } from "../managers/demolish";
 import { energyPiles } from "../managers/loot";
 import { refreshEnergyState } from "../utils/energy";
-import { wornRoad } from "../planner/remoteRoads";
 
 export function runPioneer(creep: Creep): void {
   const roomName = creep.memory.targetRoom;
@@ -63,11 +64,11 @@ function work(creep: Creep): void {
     return;
   }
 
-  // 路铺完了就转去补磨损的那几格。外矿房间里没有塔，路没人管就会慢慢塌掉，
-  // 而这条路线正是它被派来的理由
-  const worn = wornRoad(creep.room);
+  // 工地清空后转去补磨损。外矿没有塔，容器和路都会慢慢塌，而修它们正是
+  // 派拓荒者过来的理由。容器优先：矿工站在上面，塌了能量就重新洒一地
+  const worn = wornContainer(creep.room) ?? wornRoad(creep.room);
   if (worn) {
-    announce(creep, "补路");
+    announce(creep, worn.structureType === STRUCTURE_CONTAINER ? "补桶" : "补路");
     if (creep.repair(worn) === ERR_NOT_IN_RANGE) {
       travelTo(creep, worn, { visualizePathStyle: { stroke: "#ffdd44" } });
     }
@@ -75,8 +76,8 @@ function work(creep: Creep): void {
   }
 
   const controller = creep.room.controller;
-  // 不是自己的控制器就升不了级（外矿铺路的情况）。手上的能量留着修路，
-  // 站在原地等下一格磨损比跑回家更省
+  // 不是自己的控制器就升不了级（外矿基建的情况）。手上的能量留着修，
+  // 站在原地等比跑回家更省
   if (!controller?.my) {
     announce(creep, "待命");
     return;
@@ -94,6 +95,10 @@ function pickSite(creep: Creep): ConstructionSite | null {
 
   const spawn = sites.find(site => site.structureType === STRUCTURE_SPAWN);
   if (spawn) return spawn;
+
+  // 矿边容器比路面优先：一建好矿工的产出就进桶，运输队不用在地上扫
+  const container = sites.find(site => site.structureType === STRUCTURE_CONTAINER);
+  if (container) return container;
 
   return creep.pos.findClosestByPath(sites);
 }
@@ -137,6 +142,17 @@ function harvest(creep: Creep): void {
     return;
   }
 
+  // 外矿基建时矿边容器是现成的能量桶——修路/建路的材料直接从这里取，
+  // 不必跟运输队抢地上那一堆，也不必自己去挖
+  const mining = miningEnergy(creep.room);
+  if (mining) {
+    announce(creep, "取桶");
+    if (creep.withdraw(mining, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) {
+      travelTo(creep, mining, { visualizePathStyle: { stroke: "#ffaa00" } });
+    }
+    return;
+  }
+
   const stash = energyPiles(creep.room)[0];
   if (stash) {
     announce(creep, "取货");
@@ -158,6 +174,14 @@ function harvest(creep: Creep): void {
 }
 
 type Loot = Resource | Ruin | Tombstone;
+
+function miningEnergy(room: Room): StructureContainer | undefined {
+  for (const spot of Object.values(room.memory.miningSpots ?? {})) {
+    const container = containerAt(room, spot.x, spot.y);
+    if (container && container.store[RESOURCE_ENERGY] > 0) return container;
+  }
+  return undefined;
+}
 
 function pickLoot(creep: Creep): Loot | null {
   const dropped = creep.room

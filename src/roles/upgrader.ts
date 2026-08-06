@@ -42,7 +42,9 @@ export function runUpgrader(creep: Creep): void {
   if (creep.memory.working) {
     moveAndUpgrade(creep, controller);
   } else {
-    gatherEnergy(creep);
+    // 和 builder 同一条让位规则：控制器有两万 tick 的降级余量，extension 一空
+    // 房间当场就孵不出人
+    gatherEnergy(creep, true);
   }
 }
 
@@ -71,6 +73,11 @@ function hasGivenUp(creep: Creep, container: StructureContainer): boolean {
  * 站定之后再也不用挪窝。
  */
 function upgradeFromContainer(creep: Creep, controller: StructureController, container: StructureContainer): void {
+  // 上一轮跑腿时认领的货得撒手。物流系统按认领扣在途量，而静态升级根本不会去取那份
+  // 货——留着就等于永久替它占位：矿边容器里只剩一百来点时，这一扣足以让整条供给从
+  // 供给表里消失，搬运工于是报"无货源"，站在有货的容器旁边不动
+  delete creep.memory.withdrawFrom;
+
   const station = claimStation(creep);
 
   if (station && (creep.pos.x !== station.x || creep.pos.y !== station.y)) {

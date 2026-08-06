@@ -10,6 +10,7 @@
  * 而两份状态迟早对不上。想看任务进度用 expand() / loot() / remote()。
  */
 
+import { enableRemote } from "./remote";
 import { log } from "../utils/logger";
 import { startExpansion } from "./expansion";
 import { startLoot } from "./loot";
@@ -96,12 +97,11 @@ function addRemote(home: Room, target: string): string {
   if (!memory?.scouted) return `${target} 还没侦察过，等 scout 去过再插旗`;
   if (memory.unusable) return `${target} 不可用：${memory.unusable}`;
 
-  const remotes = (home.memory.remotes ??= []);
+  const remotes = home.memory.remotes ?? [];
   if (remotes.includes(target)) return `${target} 已经在 ${home.name} 的外矿名单里`;
 
-  remotes.push(target);
-  memory.home = home.name;
-  return `${home.name} 外矿名单 → ${remotes.join(" ")}`;
+  enableRemote(home, target);
+  return `${home.name} 外矿名单 → ${(home.memory.remotes ?? []).join(" ")}`;
 }
 
 /** 控制台的 flaghelp 用这张表生成说明，不手写第二份 */

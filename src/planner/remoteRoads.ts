@@ -1,20 +1,25 @@
 /**
- * 外矿到基地的路。
+ * 外矿基础设施：到基地的路，以及矿边的容器。
  *
- * 值得铺是因为收益会被跑过的次数放大：运输队一辈子就在源和基地之间往返，路面把
+ * 路值得铺是因为收益会被跑过的次数放大：运输队一辈子就在源和基地之间往返，路面把
  * 每格的疲劳从 2 降到 1，等于让同样的预算多买一半 CARRY——没有路的时候它必须
  * 一比一配 MOVE 才能满载全速，铺好之后二比一就够了。
+ *
+ * 容器同理：矿工站在上面挖，能量直接进桶，运输队不用在地上扫；每房上限 5 个，
+ * 外矿常见一两个源，名额绰绰有余。路和容器都由派驻的拓荒者建、修。
  *
  * 和房内主干道分开存（`RoomMemory.remoteRoads`），不和 `roads` 合成一份，是为了
  * 两件事互不干扰：房间重新规划时不会把外矿路线冲掉，外矿换人家时也只用清掉
  * 自己那一段。读的时候两份取并集。
  */
 
+import { Coord, SourceInfo, planMiningSpotsOnly } from "./outposts";
 import { bunkerEntrances, decodeCells, encodeCells } from "./roads";
 import { BUNKER_STRUCTURES } from "./bunkerLayout";
-import { Coord } from "./outposts";
+import { containerAt } from "../utils/structures";
 import { isBunkerCell } from "./bunkerPlanner";
 import { log } from "../utils/logger";
+import { terrainOfRoom } from "./terrain";
 
 /** 和 movement/costMatrix 同一套相对代价，规划出来的才是 creep 真会走的路 */
 const ROAD_COST = 1;
@@ -94,6 +99,43 @@ export function planRemoteRoads(home: Room, roomName: string): void {
   log.info("外矿", `${roomName} → ${home.name} 的路线规划完毕，共 ${total} 格，跨 ${byRoom.size} 个房间`);
 }
 
+/**
+ * 算出外矿每个源旁边的容器落点。
+ *
+ * 要在路线规划之后跑：落点会优先贴着已经算好的路面，运输队取货不用绕路。
+ * 没有视野也能算——地形和源坐标都在 Memory 里。
+ */
+export function planRemoteMiningSpots(home: Room, roomName: string): void {
+  const sources = Memory.rooms[roomName]?.sources;
+  if (!sources) return;
+
+  const list: SourceInfo[] = Object.entries(sources).map(([id, spot]) => ({
+    id,
+    x: spot.x,
+    y: spot.y
+  }));
+  if (list.length === 0) return;
+
+  const favored = new Set(remoteRoadCells(roomName).map(cell => `${cell.x},${cell.y}`));
+  const spots = planMiningSpotsOnly(terrainOfRoom(roomName), list, preferenceToward(home.name, roomName), favored);
+
+  const memory = (Memory.rooms[roomName] ??= {} as RoomMemory);
+  memory.miningSpots = spots;
+
+  const count = Object.keys(spots).length;
+  log.info("外矿", `${roomName} 矿边容器落点规划完毕，共 ${count} 个`);
+}
+
+/** 朝向老家的那个出口中点，用作"离家近"的参照 */
+function preferenceToward(homeName: string, remoteName: string): Coord {
+  const exit = Game.map.findExit(remoteName, homeName);
+  if (exit === FIND_EXIT_TOP) return { x: 25, y: 2 };
+  if (exit === FIND_EXIT_BOTTOM) return { x: 25, y: 47 };
+  if (exit === FIND_EXIT_LEFT) return { x: 2, y: 25 };
+  if (exit === FIND_EXIT_RIGHT) return { x: 47, y: 25 };
+  return { x: 25, y: 25 };
+}
+
 function cache(matrices: Map<string, CostMatrix>, name: string, home: Room, anchor: Coord): CostMatrix {
   const matrix = buildMatrix(name, home, anchor);
   matrices.set(name, matrix);
@@ -149,21 +191,31 @@ export function remoteRoadCells(roomName: string): Coord[] {
 }
 
 /**
- * 在外矿房间里拍路面工地。
+ * 在外矿房间里拍容器和路面工地。
  *
  * 房间不归我们，`runRoomPlanner` 不管它，所以这件事挂在"有视野时看一眼"那条
- * 路径上。无主房间里造路不受等级限制（没有控制器就没有建筑上限），拍得下。
+ * 路径上。容器不看老家等级——无主/预定房间里照样拍得下；路仍按老家等级解锁。
+ * 容器优先占工地名额：矿边桶比路面更直接影响产出。
  */
-export function maintainRemoteRoadSites(room: Room, level: number, minLevel: number): void {
+export function maintainRemoteSites(room: Room, level: number, minLevel: number): void {
+  let open = room.find(FIND_MY_CONSTRUCTION_SITES).length;
+
+  for (const spot of Object.values(room.memory.miningSpots ?? {})) {
+    if (open >= MAX_ROAD_SITES) return;
+
+    const position = room.getPositionAt(spot.x, spot.y);
+    if (!position) continue;
+    if (position.lookFor(LOOK_STRUCTURES).some(structure => structure.structureType === STRUCTURE_CONTAINER)) {
+      continue;
+    }
+    if (position.lookFor(LOOK_CONSTRUCTION_SITES).length > 0) continue;
+
+    if (room.createConstructionSite(spot.x, spot.y, STRUCTURE_CONTAINER) === OK) open++;
+  }
+
   if (level < minLevel) return;
 
-  const cells = remoteRoadCells(room.name);
-  if (cells.length === 0) return;
-
-  let open = room.find(FIND_MY_CONSTRUCTION_SITES).length;
-  if (open >= MAX_ROAD_SITES) return;
-
-  for (const cell of cells) {
+  for (const cell of remoteRoadCells(room.name)) {
     if (open >= MAX_ROAD_SITES) return;
 
     const position = room.getPositionAt(cell.x, cell.y);
@@ -192,6 +244,19 @@ export function wornRoad(room: Room): StructureRoad | undefined {
   return worst;
 }
 
+/** 矿边容器里血量最低的那一个 */
+export function wornContainer(room: Room): StructureContainer | undefined {
+  let worst: StructureContainer | undefined;
+
+  for (const spot of Object.values(room.memory.miningSpots ?? {})) {
+    const container = containerAt(room, spot.x, spot.y);
+    if (!container || container.hits > container.hitsMax * REPAIR_THRESHOLD) continue;
+    if (!worst || container.hits < worst.hits) worst = container;
+  }
+
+  return worst;
+}
+
 /** 这条路线还差几格没铺，配额靠它判断要不要派人 */
 export function unbuiltRemoteRoads(room: Room): number {
   let missing = 0;
@@ -202,6 +267,18 @@ export function unbuiltRemoteRoads(room: Room): number {
       ?.lookFor(LOOK_STRUCTURES)
       .some(structure => structure.structureType === STRUCTURE_ROAD);
 
+    if (!built) missing++;
+  }
+
+  return missing;
+}
+
+/** 矿边容器还差几个没建 */
+export function unbuiltRemoteContainers(room: Room): number {
+  let missing = 0;
+
+  for (const spot of Object.values(room.memory.miningSpots ?? {})) {
+    const built = containerAt(room, spot.x, spot.y) !== undefined;
     if (!built) missing++;
   }
 

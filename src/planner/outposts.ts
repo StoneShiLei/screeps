@@ -158,6 +158,76 @@ function standingSpots(terrain: TerrainGrid, anchor: Coord, container: Coord, bl
 }
 
 /**
+ * 只算矿边落点：没有 bunker、没有升级站。
+ *
+ * 外矿房间用这个——那边没有家，也不需要控制器旁的容器。preference 是"离家更近"
+ * 的参照点（通常是朝向老家的出口），favored 是加分格（通常是已经规划好的路面），
+ * 运输队取货时不用绕开路。
+ */
+export function planMiningSpotsOnly(
+  terrain: TerrainGrid,
+  sources: SourceInfo[],
+  preference: Coord,
+  favored: Set<string> = new Set()
+): Record<string, Coord> {
+  const distanceFrom = walkingDistanceFrom(terrain, preference.x, preference.y);
+  const taken = new Set<string>();
+  const miningSpots: Record<string, Coord> = {};
+
+  for (const source of sources) {
+    const spot = pickAdjacent(terrain, source, 1, distanceFrom, taken, favored);
+    if (spot) {
+      miningSpots[source.id] = spot;
+      taken.add(`${spot.x},${spot.y}`);
+    }
+  }
+
+  return miningSpots;
+}
+
+/**
+ * 在目标周围挑一格：先看离 preference 近不近，同等距离再看是不是 favored。
+ *
+ * 和家里那套不同：外矿没有 bunker 地皮，也不必躲布局表。
+ */
+function pickAdjacent(
+  terrain: TerrainGrid,
+  target: Coord,
+  radius: number,
+  distanceFrom: Uint16Array,
+  taken: Set<string>,
+  favored: Set<string>
+): Coord | undefined {
+  let best: Coord | undefined;
+  let bestDistance = Infinity;
+  let bestFavored = false;
+
+  for (let dy = -radius; dy <= radius; dy++) {
+    for (let dx = -radius; dx <= radius; dx++) {
+      if (dx === 0 && dy === 0) continue;
+
+      const x = target.x + dx;
+      const y = target.y + dy;
+      if (!isBuildable(terrain, x, y)) continue;
+      if (taken.has(`${x},${y}`)) continue;
+
+      const distance = distanceFrom[y * ROOM_SIZE + x];
+      if (distance === UNREACHABLE) continue;
+
+      const onFavored = favored.has(`${x},${y}`);
+      if (distance > bestDistance) continue;
+      if (distance === bestDistance && bestFavored && !onFavored) continue;
+
+      best = { x, y };
+      bestDistance = distance;
+      bestFavored = onFavored;
+    }
+  }
+
+  return best;
+}
+
+/**
  * 算出所有外围落点。
  *
  * 只做一次全房间的寻路（从锚点出发），之后每个候选格子查表即可，

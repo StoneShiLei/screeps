@@ -22,13 +22,13 @@ import {
 } from "../utils/settings";
 import { cancelExpansion, expansionStatus, startExpansion } from "../managers/expansion";
 import { cleanupCreepMemory, cleanupRoomMemory } from "../utils/memory";
-import { isRemotePaused, reserveLeft } from "../managers/remote";
+import { enableRemote, isRemotePaused, reserveLeft } from "../managers/remote";
 import { loadByRole, spawnLoadOf } from "../managers/spawnLoad";
 import { lootPiles, lootStatus, startLoot, stopLoot } from "../managers/loot";
 import { flagHelpText } from "../managers/flags";
 import { logisticsOf } from "../managers/logistics";
 import { planRoom } from "../planner/roomPlanner";
-import { roomPopulation } from "../managers/spawnManager";
+import { spawnQueue } from "../managers/spawnManager";
 
 export interface Command {
   usage: string;
@@ -122,16 +122,18 @@ export const COMMANDS: Record<string, Command> = {
   },
   quota: {
     usage: "quota(room?)",
-    describe: "查看各角色配额与实到人数",
+    describe: "按孵化优先级查看配额与缺口（★ = 下一个造谁）",
     run: roomName => {
       const room = resolveRoom(roomName);
       if (typeof room === "string") return room;
 
-      const { counts, quota } = roomPopulation(room);
-      const lines = (Object.keys(quota) as CreepRole[]).map(
-        role => `  ${role.padEnd(10)} ${counts[role]}/${quota[role]}`
-      );
-      return `${room.name} 人口\n${lines.join("\n")}`;
+      const { next, slots } = spawnQueue(room);
+      const lines = slots.map(slot => {
+        const mark = slot.role === next ? "★" : " ";
+        const gap = slot.deficit > 0 ? `  缺${slot.deficit}` : "";
+        return ` ${mark}${slot.role.padEnd(12)} ${slot.count}/${slot.quota}${gap}`;
+      });
+      return `${room.name} 孵化队列${next ? `（下一个 ${next}）` : "（满编）"}\n${lines.join("\n")}`;
     }
   },
   load: {
@@ -165,12 +167,10 @@ export const COMMANDS: Record<string, Command> = {
       if (!memory?.scouted) return `${target} 还没侦察过，等 scout 去过再加`;
       if (memory.unusable) return `${target} 不可用：${memory.unusable}`;
 
-      const remotes = (room.memory.remotes ??= []);
-      if (remotes.includes(target)) return `${target} 已经在名单里`;
+      if ((room.memory.remotes ?? []).includes(target)) return `${target} 已经在名单里`;
 
-      remotes.push(target);
-      memory.home = room.name;
-      return `${room.name} 外矿名单 → ${remotes.join(" ")}`;
+      enableRemote(room, target);
+      return `${room.name} 外矿名单 → ${(room.memory.remotes ?? []).join(" ")}`;
     }
   },
   "remote.drop": {

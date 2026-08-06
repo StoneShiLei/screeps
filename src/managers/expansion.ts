@@ -144,8 +144,8 @@ export function pioneerQuota(home: Room): number {
   if (stage === "build") return affordable(home, PIONEERS_BUILDING);
   if (stage === "grow") return affordable(home, PIONEERS_GROWING);
 
-  // 分房那边不忙的时候，这套身体正好去外矿铺路：一样是跨房间通勤、就地找能量、
-  // 建造和修理，不必再造一种角色
+  // 分房那边不忙的时候，这套身体正好去外矿建容器和铺路：一样是跨房间通勤、
+  // 就地找能量、建造和修理，不必再造一种角色
   if (roadCrewTarget(home)) return affordable(home, ROAD_CREW);
 
   return 0;
@@ -294,7 +294,7 @@ export function colonyDefenders(home: Room): { target: string; count: number } |
 /**
  * 给占领者和拓荒者派活。
  *
- * 分房优先；分房那边不需要人的时候，拓荒者转去外矿铺路。
+ * 分房优先；分房那边不需要人的时候，拓荒者转去外矿建容器和铺路。
  */
 export function expansionAssignment(home: Room): Partial<CreepMemory> {
   const target = expansionTarget(home);

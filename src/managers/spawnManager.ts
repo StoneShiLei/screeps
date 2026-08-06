@@ -43,6 +43,24 @@ const UPGRADER_BUSY = 2;
 /** 没工地时的升级工人数，能量没别处去就全推给控制器 */
 const UPGRADER_IDLE = 4;
 
+/** 产出被吃光时的最低编制：升级工留一个顶降级，建造留一个别彻底停工 */
+const UPGRADER_STARVED = 1;
+const BUILDER_STARVED = 1;
+
+/** 有工地时的建造工人数 */
+const BUILDER_BUSY = 2;
+
+/**
+ * 矿边存货低于这个数就算"挖出来当场被领走"。
+ *
+ * 数量级取一个搬运工一趟的运力：低于这个数，搬运工连一趟满载都装不出来，
+ * 说明产出在落地的那一刻就被消费端领走了。
+ */
+const STARVED_BACKLOG = 500;
+
+/** 控制器旁的粮仓低于这个数算见底，只够一个升级工烧几十 tick */
+const GRANARY_LOW = 200;
+
 /**
  * 满级之后的升级工人数和体型。
  *
@@ -98,7 +116,9 @@ function quotaFor(room: Room, counts: Record<CreepRole, number>): Record<CreepRo
     // 搬运工断档时先补一个自给自足的 harvester 把链条接上。
     harvester: counts.hauler === 0 ? 1 : 0,
     upgrader: upgraderQuota(room, sites),
-    builder: sites > 0 ? 2 : 0
+    // 产出被吃光时留一个就够：两个 builder 每 tick 烧 10 点，正好是一个能量源的
+    // 全部再生量，而工地慢几百 tick 建完不影响房间存活
+    builder: sites > 0 ? (isStarved(room) ? BUILDER_STARVED : BUILDER_BUSY) : 0
   };
 }
 
@@ -142,13 +162,47 @@ function localDefenders(room: Room): number {
 function upgraderQuota(room: Room, sites: number): number {
   if (room.controller?.level === 8) return RCL8_UPGRADERS;
 
-  // 粮仓满着说明运进来的比用掉的多，这时候压着人数就是让能量烂在容器里。
-  // 外矿一通就容易出现这种局面：收入涨了，出口还是原来那两个人
-  const wanted = sites > 0 && !isGranaryFull(room) ? UPGRADER_BUSY : UPGRADER_IDLE;
+  const wanted = desiredUpgraders(room, sites);
 
   // 站位还没规划出来时先不封顶，那时升级工本来就是自己跑腿，不占固定位置
   const stations = room.memory.upgradeStations?.length ?? 0;
   return stations > 0 ? Math.min(wanted, stations) : wanted;
+}
+
+function desiredUpgraders(room: Room, sites: number): number {
+  // 产出被吃光时收到最低。这条得排在最前面：粮仓满了要加人的判断是对称的，
+  // 而少了向下这一半，人数只会一路涨上去——桶被抽干之后编制还停在四个，
+  // 房间就稳定在超编状态，矿边永远见底，搬运工报"无货源"
+  if (isStarved(room)) return UPGRADER_STARVED;
+
+  // 粮仓满着说明运进来的比用掉的多，这时候压着人数就是让能量烂在容器里。
+  // 外矿一通就容易出现这种局面：收入涨了，出口还是原来那两个人
+  return sites > 0 && !isGranaryFull(room) ? UPGRADER_BUSY : UPGRADER_IDLE;
+}
+
+/**
+ * 消费端已经把产出吃干了没有。
+ *
+ * 两个条件一起看才稳。矿边存货低于一趟运力，说明矿工挖出来的当场就被领走；粮仓
+ * 同时见底，说明这不是搬运工刚好清空了一轮，而是真的一点余量都不剩。只看其中
+ * 任何一个都会误判——粮仓在升级工换班的间隙也会空，矿边存货在搬运工刚取完货的
+ * 那一 tick 也是零，而配额抖动的代价是人派出去又派不满，两头都不划算。
+ *
+ * 粮仓还没建出来时不下这个结论：那时候没有这个信号，宁可让别的闸去管。
+ */
+function isStarved(room: Room): boolean {
+  const granary = granaryEnergy(room);
+  if (granary === undefined) return false;
+
+  return granary < GRANARY_LOW && sourceBacklog(room) < STARVED_BACKLOG;
+}
+
+/** 控制器旁那个容器里还剩多少能量，容器还没建就返回 undefined */
+function granaryEnergy(room: Room): number | undefined {
+  const spot = room.memory.upgradeSpot;
+  if (!spot) return undefined;
+
+  return containerAt(room, spot.x, spot.y)?.store[RESOURCE_ENERGY];
 }
 
 /**
@@ -166,6 +220,18 @@ function isGranaryFull(room: Room): boolean {
 }
 
 /**
+ * 等着被运走的存货：地上的、废墟墓碑里的、矿边容器里的。
+ *
+ * storage 里的存货不算，那是攒着备用的，不是等着运走的。搬运工人数和"产出被
+ * 吃光了没有"共用这一个口径，两处的判断才不会互相打脸。
+ */
+function sourceBacklog(room: Room): number {
+  return logisticsOf(room)
+    .supplies.filter(entry => entry.priority <= SUPPLY_PRIORITY.source)
+    .reduce((sum, entry) => sum + entry.amount, 0);
+}
+
+/**
  * 按积压量决定派几个搬运工。
  *
  * 固定人数很难拍准：矿工体型、矿到基地的距离、房间里有没有废墟可捡，
@@ -177,12 +243,7 @@ export function haulersForBacklog(backlog: number): number {
 }
 
 function haulerQuota(room: Room): number {
-  // storage 里的存货不算积压，那是攒着备用的，不是等着运走的
-  const backlog = logisticsOf(room)
-    .supplies.filter(entry => entry.priority <= SUPPLY_PRIORITY.source)
-    .reduce((sum, entry) => sum + entry.amount, 0);
-
-  return haulersForBacklog(backlog);
+  return haulersForBacklog(sourceBacklog(room));
 }
 
 /**
@@ -197,7 +258,7 @@ function haulerQuota(room: Room): number {
  * 外矿那三个排在全部本土角色之后。外矿是锦上添花，家里的产线还没配齐就
  * 往外派人，等于把本来该变成 extension 的能量拿去补一条更长更脆的运输线。
  */
-const SPAWN_PRIORITY: CreepRole[] = [
+export const SPAWN_PRIORITY: CreepRole[] = [
   "defender",
   "harvester",
   "miner",
@@ -389,4 +450,31 @@ function showSpawningProgress(spawns: StructureSpawn[]): void {
 export function roomPopulation(room: Room): { counts: Record<CreepRole, number>; quota: Record<CreepRole, number> } {
   const counts = countByRole(room);
   return { counts, quota: quotaFor(room, counts) };
+}
+
+export interface SpawnSlot {
+  role: CreepRole;
+  count: number;
+  quota: number;
+  deficit: number;
+}
+
+/**
+ * 按真实孵化顺序排出编制表。
+ *
+ * 面板和 quota() 都看这份：谁缺人、下一个造谁，和 spawn 实际挑活用的是同一条
+ * SPAWN_PRIORITY，不会出现"面板说缺运、实际却在造升级工"的错位。
+ */
+export function spawnQueue(room: Room): { next: CreepRole | undefined; slots: SpawnSlot[] } {
+  const counts = countByRole(room);
+  const quota = quotaFor(room, counts);
+  const slots = SPAWN_PRIORITY.filter(role => quota[role] > 0 || counts[role] > 0).map(role => ({
+    role,
+    count: counts[role],
+    quota: quota[role],
+    deficit: Math.max(0, quota[role] - counts[role])
+  }));
+  const next = SPAWN_PRIORITY.find(role => counts[role] < quota[role]);
+
+  return { next, slots };
 }

@@ -14,7 +14,15 @@ import { announce, log } from "../utils/logger";
 import { bodyFor, maxRepeatFor } from "../utils/body";
 import { commuteTo, travelTo } from "../movement/move";
 import { hostilesIn, intrudersIn } from "../roles/defender";
-import { maintainRemoteRoadSites, planRemoteRoads, unbuiltRemoteRoads, wornRoad } from "../planner/remoteRoads";
+import {
+  maintainRemoteSites,
+  planRemoteMiningSpots,
+  planRemoteRoads,
+  unbuiltRemoteContainers,
+  unbuiltRemoteRoads,
+  wornContainer,
+  wornRoad
+} from "../planner/remoteRoads";
 import { ROAD_MIN_LEVEL } from "../planner/roomPlanner";
 import { costMatrixFor } from "../movement/costMatrix";
 import { isRetiring } from "./relief";
@@ -348,7 +356,7 @@ function isRetiringReserver(creep: Creep, home: Room): boolean {
 }
 
 /**
- * 需要派人去铺路或补路的外矿房间。
+ * 需要派人去建/修外矿基础设施（矿边容器和路）的房间。
  *
  * 交给拓荒者而不是给运输队挂 WORK，是一笔算得清的账。维护本身极便宜：一格路每
  * 1000 tick 掉 100 血，一个 WORK 每 tick 修 100 血只花 1 能量，整条四十格的路线
@@ -358,13 +366,13 @@ function isRetiringReserver(creep: Creep, home: Room): boolean {
  * 账是反的。
  *
  * 建造更不适合顺手做：一格路 300 点进度，一个 WORK 每 tick 推 5 点，站着 60 tick
- * 才铺完一格，而那是运输队半个往返。
+ * 才铺完一格，而那是运输队半个往返。容器同理。
  *
- * 拓荒者本来就会跨房间通勤、就地找能量、建造和修理，四个 WORK 每 tick 推 20 点，
- * 15 tick 铺一格；能量直接吃矿工丢在地上的那堆，等于外矿自己出钱修自己的路。
+ * 拓荒者本来就会跨房间通勤、就地找能量、建造和修理；能量直接吃矿工产出，等于
+ * 外矿自己出钱修自己的路和容器。容器不看老家等级，路仍按 ROAD_MIN_LEVEL 解锁。
  */
 export function roadCrewTarget(home: Room): string | undefined {
-  if ((home.controller?.level ?? 0) < ROAD_MIN_LEVEL) return undefined;
+  const canRoad = (home.controller?.level ?? 0) >= ROAD_MIN_LEVEL;
 
   for (const roomName of [...new Set(activeRemoteSources(home).map(entry => entry.roomName))]) {
     if (isRemotePaused(roomName)) continue;
@@ -374,7 +382,8 @@ export function roadCrewTarget(home: Room): string | undefined {
     const room = Game.rooms[roomName];
     if (!room) continue;
 
-    if (unbuiltRemoteRoads(room) > 0 || wornRoad(room)) return roomName;
+    if (unbuiltRemoteContainers(room) > 0 || wornContainer(room)) return roomName;
+    if (canRoad && (unbuiltRemoteRoads(room) > 0 || wornRoad(room))) return roomName;
   }
 
   return undefined;
@@ -496,13 +505,26 @@ export function runRemoteManager(home: Room): void {
     return;
   }
 
-  remotes.push(candidate);
-  Memory.rooms[candidate].home = home.name;
+  enableRemote(home, candidate);
   log.info("外矿", `${home.name} 启用外矿 ${candidate}`);
+}
 
-  // 路线现在就算好存着，等级到了自然会开工。跨房间寻路要两万 ops，
-  // 只在启用这一下跑一次
-  planRemoteRoads(home, candidate);
+/**
+ * 把房间写进外矿名单，并算好路和矿边容器落点。
+ *
+ * 旗子 / 控制台手动加外矿也走这里，免得只改了名单却忘了规划。
+ */
+export function enableRemote(home: Room, target: string): void {
+  const remotes = (home.memory.remotes ??= []);
+  if (!remotes.includes(target)) remotes.push(target);
+
+  const memory = (Memory.rooms[target] ??= {} as RoomMemory);
+  memory.home = home.name;
+
+  // 路线和落点现在就算好存着。跨房间寻路要两万 ops，只在启用这一下跑一次；
+  // 容器落点要紧挨着路面，所以路先算
+  planRemoteRoads(home, target);
+  planRemoteMiningSpots(home, target);
 }
 
 /**
@@ -656,10 +678,15 @@ export function watchRemote(room: Room): void {
 
   trackReservation(room, memory);
 
-  // 趁有人在场把路面工地补上。房间不归我们，runRoomPlanner 不管它，而无主房间里
-  // 造路不受等级限制（没有控制器就没有建筑上限）
+  // 趁有人在场把容器和路面工地补上。房间不归我们，runRoomPlanner 不管它
   const home = Game.rooms[memory.home];
-  if (home) maintainRemoteRoadSites(room, home.controller?.level ?? 0, ROAD_MIN_LEVEL);
+  if (home) {
+    // 旧外矿可能只有路没有落点：有视野时补算一次
+    if (!room.memory.miningSpots && room.memory.sources) {
+      planRemoteMiningSpots(home, room.name);
+    }
+    maintainRemoteSites(room, home.controller?.level ?? 0, ROAD_MIN_LEVEL);
+  }
 
   // 归属变化和 invader core 进驻都不是急事，隔一阵子复查一次就够
   if (Game.time % WATCH_INTERVAL === 0) {

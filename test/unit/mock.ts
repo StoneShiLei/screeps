@@ -45,7 +45,11 @@ const FIND_CONSTANTS: Record<string, number> = {
   FIND_MY_CONSTRUCTION_SITES: 114,
   FIND_TOMBSTONES: 118,
   FIND_HOSTILE_STRUCTURES: 109,
-  FIND_RUINS: 123
+  FIND_RUINS: 123,
+  FIND_EXIT_TOP: 1,
+  FIND_EXIT_RIGHT: 3,
+  FIND_EXIT_BOTTOM: 5,
+  FIND_EXIT_LEFT: 7
 };
 
 /**
@@ -70,7 +74,14 @@ const VALUE_CONSTANTS: Record<string, string | number> = {
   MOVE: "move",
   ATTACK: "attack",
   CLAIM: "claim",
-  CARRY_CAPACITY: 50
+  CARRY_CAPACITY: 50,
+  LOOK_STRUCTURES: "structure",
+  LOOK_CONSTRUCTION_SITES: "constructionSite",
+  // 返回码：角色代码靠它区分"够不着，走过去"和"已经办成了"
+  OK: 0,
+  ERR_NOT_IN_RANGE: -9,
+  ERR_NOT_ENOUGH_RESOURCES: -6,
+  ERR_FULL: -8
 };
 
 export function installGameConstants(): void {

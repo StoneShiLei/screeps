@@ -75,6 +75,17 @@ export function isDropped(target: LogisticsTarget): target is Resource {
   return "amount" in target;
 }
 
+/**
+ * spawn 和 extension 还缺不缺能量。
+ *
+ * 这是全房间唯一一条"填不上就什么都干不了"的需求：孵化和补人全指着它，空着的时候
+ * 建造和升级快一点慢一点都无所谓。所以它有缺口时，自己不采集的角色要让开矿边容器
+ * ——那是搬运工唯一的货源。
+ */
+export function feedingSpawn(room: Room): boolean {
+  return logisticsOf(room).demands.some(entry => entry.priority <= DEMAND_PRIORITY.spawn);
+}
+
 /** 这个目标现在还有多少能量能拿 */
 export function amountIn(target: LogisticsTarget): number {
   return isDropped(target) ? target.amount : target.store[RESOURCE_ENERGY];

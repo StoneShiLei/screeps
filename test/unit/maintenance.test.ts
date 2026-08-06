@@ -5,6 +5,7 @@ import { flagHelpText, runFlagDirectives } from "../../src/managers/flags";
 import { installGameConstants } from "./mock";
 import { isPlanned } from "../../src/planner/roomPlanner";
 import { isRetiring, reliefSlots, ticksPerStep } from "../../src/managers/relief";
+import { SPAWN_PRIORITY, spawnQueue } from "../../src/managers/spawnManager";
 
 /** 一个只有 memory 的假房间，isPlanned 要的就是图纸 */
 function planned(memory: Partial<RoomMemory>): Room {
@@ -221,5 +222,156 @@ describe("旗子指令", () => {
     const text = flagHelpText();
 
     for (const prefix of ["claim", "loot", "remote", "plan"]) assert.include(text, prefix);
+  });
+});
+
+describe("孵化队列", () => {
+  let saved: { Game: unknown; Memory: unknown };
+
+  beforeEach(() => {
+    installGameConstants();
+    const context = global as unknown as typeof saved;
+    saved = { Game: context.Game, Memory: context.Memory };
+    context.Game = {
+      creeps: {},
+      // 别和别的套件撞同一个 tick：activeRemoteSources 按 Game.time 缓存，
+      // 撞上了会把上一轮空名单的结果喂给后面的预定员测试
+      time: 900000 + Math.floor(Math.random() * 100000),
+      rooms: {},
+      map: { describeExits: () => ({}), getRoomLinearDistance: () => 1 }
+    };
+    context.Memory = { rooms: {} };
+  });
+
+  afterEach(() => {
+    Object.assign(global, saved);
+  });
+
+  function bareRoom(): Room {
+    return {
+      name: "W1N1",
+      controller: { level: 4, my: true },
+      energyAvailable: 800,
+      energyCapacityAvailable: 800,
+      memory: {},
+      find: (type: number) => {
+        if (type === FIND_SOURCES) return [{ id: "s1" }, { id: "s2" }];
+        return [];
+      }
+    } as unknown as Room;
+  }
+
+  it("编制表按 SPAWN_PRIORITY 排，和 spawn 挑活同一顺序", () => {
+    const { slots } = spawnQueue(bareRoom());
+    const roles = slots.map(slot => slot.role);
+    const expected = SPAWN_PRIORITY.filter(role => roles.includes(role));
+
+    assert.deepEqual(roles, expected);
+  });
+
+  it("缺人时 next 是优先级最高的那个缺口", () => {
+    const { next, slots } = spawnQueue(bareRoom());
+
+    assert.isDefined(next);
+    assert.isAbove(slots.find(slot => slot.role === next)?.deficit ?? 0, 0);
+    // 没有 hauler 时应急 harvester 配额会亮，它排在 miner 前面
+    assert.equal(next, "harvester");
+  });
+});
+
+describe("产出被吃光时收编制", () => {
+  const spot = { x: 14, y: 21 };
+  const miningSpot = { x: 9, y: 23 };
+
+  let saved: { Game: unknown; Memory: unknown };
+
+  beforeEach(() => {
+    installGameConstants();
+    const context = global as unknown as typeof saved;
+    saved = { Game: context.Game, Memory: context.Memory };
+    context.Game = {
+      creeps: {},
+      time: 700000 + Math.floor(Math.random() * 100000),
+      rooms: {},
+      map: { describeExits: () => ({}), getRoomLinearDistance: () => 1 }
+    };
+    context.Memory = { rooms: {} };
+  });
+
+  afterEach(() => {
+    Object.assign(global, saved);
+  });
+
+  function container(id: string, at: { x: number; y: number }, energy: number): unknown {
+    return {
+      id,
+      structureType: "container",
+      pos: at,
+      store: {
+        energy,
+        getFreeCapacity: () => 2000 - energy,
+        getCapacity: () => 2000
+      }
+    };
+  }
+
+  /** granary 是控制器旁的粮仓存量，backlog 是矿边桶里等着被运走的量 */
+  function room(granary: number, backlog: number, sites = 3): Room {
+    const structures = [container("粮仓", spot, granary), container("矿边桶", miningSpot, backlog)];
+
+    return {
+      name: `W${Math.floor(Math.random() * 1e6)}N1`,
+      controller: { level: 4, my: true },
+      energyAvailable: 800,
+      energyCapacityAvailable: 800,
+      memory: {
+        upgradeSpot: spot,
+        upgradeStations: [
+          { x: 13, y: 20 },
+          { x: 14, y: 20 },
+          { x: 15, y: 20 }
+        ],
+        miningSpots: { s1: miningSpot }
+      },
+      getPositionAt: (x: number, y: number) => ({
+        x,
+        y,
+        lookFor: () => structures.filter(structure => (structure as { pos: { x: number; y: number } }).pos.x === x && (structure as { pos: { x: number; y: number } }).pos.y === y)
+      }),
+      find: (type: number) => {
+        if (type === FIND_SOURCES) return [{ id: "s1" }, { id: "s2" }];
+        if (type === FIND_STRUCTURES) return structures;
+        if (type === FIND_MY_CONSTRUCTION_SITES) return new Array(sites).fill({ structureType: "extension" });
+        return [];
+      }
+    } as unknown as Room;
+  }
+
+  function quotaOf(target: Room, role: CreepRole): number {
+    return spawnQueue(target).slots.find(slot => slot.role === role)?.quota ?? 0;
+  }
+
+  it("矿边和粮仓同时见底就压到最低人数", () => {
+    // 现场就是这个样子：三个桶各剩一百来点，而消费端每 tick 要烧 32 点，
+    // 产能只有 20——不收编制的话房间会稳定停在这个状态
+    const starved = room(100, 90);
+
+    assert.equal(quotaOf(starved, "upgrader"), 1, "留一个顶住降级就够");
+    assert.equal(quotaOf(starved, "builder"), 1);
+  });
+
+  it("粮仓还有余量就不收，那说明运进来的够花", () => {
+    const healthy = room(1000, 90);
+
+    assert.equal(quotaOf(healthy, "upgrader"), 2);
+    assert.equal(quotaOf(healthy, "builder"), 2);
+  });
+
+  it("矿边堆着货就不算被吃光，哪怕粮仓是空的", () => {
+    // 粮仓空可能只是升级工换班的间隙，矿边还堆着两千说明运力才是瓶颈
+    const backlogged = room(0, 2000);
+
+    assert.equal(quotaOf(backlogged, "upgrader"), 2);
+    assert.equal(quotaOf(backlogged, "builder"), 2);
   });
 });

@@ -1,7 +1,7 @@
 import { assert } from "chai";
 import { BUNKER_STRUCTURES, FIRST_SPAWN_OFFSET } from "../../src/planner/bunkerLayout";
 import { canPlaceBunker, isBunkerCell, rankAnchors, structuresForLevel } from "../../src/planner/bunkerPlanner";
-import { planOutposts } from "../../src/planner/outposts";
+import { planMiningSpotsOnly, planOutposts } from "../../src/planner/outposts";
 import { unlockLevel } from "../../src/planner/roomPlanner";
 import {
   ROOM_SIZE,
@@ -353,5 +353,36 @@ describe("外围落点", () => {
     const spot = miningSpots.s1;
     assert.isDefined(spot);
     assert.isFalse(isBunkerCell(anchor.x, anchor.y, spot.x, spot.y), "压在 bunker 上会和基地建筑抢位置");
+  });
+});
+
+describe("外矿矿边落点", () => {
+  it("紧贴能量源，并且挑朝向老家出口的一侧", () => {
+    const source = { id: "s1", x: 35, y: 25 };
+    // 出口在左边，等价于"家在西边"
+    const spots = planMiningSpotsOnly(emptyRoom(), [source], { x: 2, y: 25 });
+
+    assert.isDefined(spots.s1);
+    assert.equal(spots.s1.x, 34, "八个候选里应该挑靠西的那一列");
+    assert.isAtMost(Math.abs(spots.s1.y - source.y), 1);
+  });
+
+  it("同等距离时优先贴着已经规划好的路面", () => {
+    const source = { id: "s1", x: 25, y: 25 };
+    // 源四周到房间中心距离差不多，把南侧标成路面
+    const favored = new Set(["25,26"]);
+    const spots = planMiningSpotsOnly(emptyRoom(), [source], { x: 25, y: 25 }, favored);
+
+    assert.deepEqual(spots.s1, { x: 25, y: 26 }, "运输队取货时不用绕开路");
+  });
+
+  it("两个源不会抢同一格", () => {
+    const sources = [
+      { id: "a", x: 30, y: 25 },
+      { id: "b", x: 32, y: 25 }
+    ];
+    const spots = planMiningSpotsOnly(emptyRoom(), sources, { x: 2, y: 25 });
+
+    assert.notDeepEqual(spots.a, spots.b);
   });
 });

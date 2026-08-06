@@ -6,14 +6,14 @@
  */
 
 import { CROWDED, spawnLoadOf } from "./spawnLoad";
-import { SUPPLY_PRIORITY, logisticsOf } from "./logistics";
+import { DEMAND_PRIORITY, LogisticsEntry, SUPPLY_PRIORITY, logisticsOf } from "./logistics";
 import { isRemotePaused, reserveLeft } from "./remote";
 import { decodeCells } from "../planner/roads";
 import { expansionStatus } from "./expansion";
 import { isVisualOn } from "../utils/settings";
 import { lootStatus } from "./loot";
 import { pendingSiteCount } from "../planner/roomPlanner";
-import { roomPopulation } from "./spawnManager";
+import { spawnQueue } from "./spawnManager";
 
 /** 每隔这么多 tick 采一次升级进度，太密了噪声大，太稀了反应慢 */
 const SAMPLE_INTERVAL = 50;
@@ -126,12 +126,21 @@ function buildLines(room: Room, controller: StructureController): PanelLine[] {
     color: "#ffcc66"
   });
 
-  const { counts, quota } = roomPopulation(room);
-  const pop = (Object.keys(quota) as CreepRole[])
-    .filter(role => quota[role] > 0 || counts[role] > 0)
-    .map(role => `${shortRole(role)}${counts[role]}/${quota[role]}`)
-    .join(" ");
+  const { next, slots } = spawnQueue(room);
+  const pop = slots.map(slot => `${shortRole(slot.role)}${slot.count}/${slot.quota}`).join(" ");
   lines.push({ text: pop || "无人", color: "#cccccc" });
+
+  const deficits = slots.filter(slot => slot.deficit > 0);
+  if (deficits.length > 0) {
+    const queue = deficits
+      .map(slot => {
+        const mark = slot.role === next ? "★" : "";
+        const times = slot.deficit > 1 ? `×${slot.deficit}` : "";
+        return `${mark}${shortRole(slot.role)}${times}`;
+      })
+      .join(" ");
+    lines.push({ text: `队 ${queue}`, color: "#ffcc66" });
+  }
 
   lines.push(logisticsLine(room));
   lines.push(spawnLine(room));
@@ -173,6 +182,11 @@ function buildLines(room: Room, controller: StructureController): PanelLine[] {
  *
  * 待运只算地上的和矿边容器里的，storage 里的存货不算：那是攒着备用的，
  * 不是积压。口径和 spawnManager 决定 hauler 人数时用的完全一致。
+ *
+ * 缺口只算 spawn、extension 和 tower，容器和 storage 的空位另算成"囤"。
+ * 全部求和的口径会骗人：控制器旁那个桶和 bunker 里的缓冲桶各有 2000 容量，而它们
+ * 按定义就该是没填满的状态，于是缺口常年显示四千上下——看着像随时要断供，实际
+ * spawn 和 extension 一点不缺。真正会让房间停摆的只有前三种。
  */
 function logisticsLine(room: Room): PanelLine {
   const { supplies, demands } = logisticsOf(room);
@@ -180,12 +194,27 @@ function logisticsLine(room: Room): PanelLine {
   const waiting = supplies
     .filter(entry => entry.priority <= SUPPLY_PRIORITY.source)
     .reduce((sum, entry) => sum + entry.amount, 0);
-  const missing = demands.reduce((sum, entry) => sum + entry.amount, 0);
+
+  const { missing, stashing } = splitDemands(demands);
+  const stash = stashing > 0 ? ` 囤 ${stashing}` : "";
 
   return {
-    text: `待运 ${waiting} 缺口 ${missing}`,
+    text: `待运 ${waiting} 缺口 ${missing}${stash}`,
     color: waiting > BACKLOG_WARN ? "#ffaa44" : "#aaccaa"
   };
+}
+
+/** 把需求分成"填不上就停摆的"和"只是囤着的"两摊 */
+export function splitDemands(demands: LogisticsEntry[]): { missing: number; stashing: number } {
+  let missing = 0;
+  let stashing = 0;
+
+  for (const entry of demands) {
+    if (entry.priority <= DEMAND_PRIORITY.tower) missing += entry.amount;
+    else stashing += entry.amount;
+  }
+
+  return { missing, stashing };
 }
 
 /**
