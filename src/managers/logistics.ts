@@ -57,20 +57,6 @@ export const SUPPLY_PRIORITY = {
 /** tower 装到这个比例以上就不再补，免得 hauler 为了几十点能量反复跑 */
 const TOWER_REFILL_THRESHOLD = 0.8;
 
-/**
- * 控制器粮仓 / 缓冲桶补到这个量为止。
- *
- * 曾经这里是一对滞回阈值：低于 LOW(500) 才进需求表、高于 LOW 才算供给。结果是
- * 桶稳定卡在 500 上下——搬运工一趟送满就撒手认领，下一趟回来桶已经 542，不再
- * 进需求表；工人那边可取的只有 42 点，低于起送量，于是桶里明明写着五百多，
- * builder 却报"无货源"站着不动。两条线画在同一个数上，中间那段谁都碰不了。
- *
- * 现在只留一条线：低于它就一直挂在需求表里（优先级压在 spawn / tower 之下，
- * 抢不到急件的运力才会去填），桶里的货工人随便取。搬运工不会拿它空转——见
- * hauler 的 availableSupplies，除非有比缓冲桶更急的需求，否则不从桶里往外掏。
- */
-const CONTAINER_REFILL_HIGH = 1500;
-
 /** 低于这个量的供给不值得专门跑一趟 */
 const MIN_PICKUP_AMOUNT = 50;
 
@@ -269,6 +255,10 @@ export function chooseEntry(fromX: number, fromY: number, entries: LogisticsEntr
 
 /**
  * 把供需状态画在房间里。
+ *
+ * 认领线不只画家里的 hauler：remoteHauler、looter、pioneer，以及走
+ * claimSupply 取货的工人（builder / upgrader 等）只要本房有 deliverTo /
+ * withdrawFrom，都画上——否则外矿运输队在矿边取货时像没进物流表。
  */
 export function visualizeLogistics(room: Room): void {
   if (!isVisualOn("logistics")) return;
@@ -284,12 +274,14 @@ export function visualizeLogistics(room: Room): void {
   }
 
   for (const creep of Object.values(Game.creeps)) {
-    if (creep.memory.role !== "hauler" || creep.memory.room !== room.name) continue;
+    // 按人在哪画，不按归属房：外矿搬运工取货时人在邻房
+    if (creep.room.name !== room.name) continue;
 
     const delivering = Boolean(creep.memory.deliverTo);
     const targetId = creep.memory.deliverTo ?? creep.memory.withdrawFrom;
     const target = targetId ? Game.getObjectById(targetId as Id<LogisticsTarget>) : null;
-    if (!target) continue;
+    // RoomVisual 只能画本房坐标；隔房认领等进了目标房再画
+    if (!target || target.pos.roomName !== room.name) continue;
 
     visual.line(creep.pos, target.pos, {
       color: delivering ? "#ffffff" : "#ffaa00",
@@ -476,13 +468,9 @@ function pushIfHungry(
   entries.push({ id: structure.id, x: structure.pos.x, y: structure.pos.y, amount: missing, priority });
 }
 
-/** 没装满 HIGH 就一直挂着，缺口按补到 HIGH 算 */
+/** 容器有空位就挂需求，缺口按补满算（和 storage 同一口径） */
 function pushContainerDemand(entries: LogisticsEntry[], structure: StructureContainer, priority: number): void {
-  const energy = structure.store[RESOURCE_ENERGY];
-  const missing = Math.min(CONTAINER_REFILL_HIGH - energy, structure.store.getFreeCapacity(RESOURCE_ENERGY) ?? 0);
-  if (missing <= 0) return;
-
-  entries.push({ id: structure.id, x: structure.pos.x, y: structure.pos.y, amount: missing, priority });
+  pushIfHungry(entries, structure, priority);
 }
 
 function pushIfStocked(entries: LogisticsEntry[], holder: AnyStoreStructure | Tombstone | Ruin, priority: number): void {
@@ -495,14 +483,9 @@ function pushIfStocked(entries: LogisticsEntry[], holder: AnyStoreStructure | To
 /**
  * 已经认领的送货目标还收不收得下。
  *
- * 容器按 HIGH 判断：没到 HIGH 仍算开口，上路之后允许一直补满，
- * 否则送到一半就撒手，下一趟又得重跑。
+ * 容器和 storage 一样：有空位就继续送，送到一半不撒手。
  */
 function demandStillOpen(structure: AnyStoreStructure): boolean {
-  if (structure.structureType === STRUCTURE_CONTAINER) {
-    return structure.store[RESOURCE_ENERGY] < CONTAINER_REFILL_HIGH;
-  }
-
   if (structure.structureType === STRUCTURE_TOWER) {
     const cap = structure.store.getCapacity(RESOURCE_ENERGY);
     if (!cap) return false;

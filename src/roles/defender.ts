@@ -12,16 +12,27 @@
 import { announce, log } from "../utils/logger";
 import { commuteTo, travelTo } from "../movement/move";
 import { bodyFor } from "../utils/body";
+import { costMatrixFor } from "../movement/costMatrix";
 import { requestMove } from "../movement/traffic";
 
 /** 敌人离得比这还远就先不管，省得被牵着满房间跑，离开塔的火力范围 */
 const CHASE_RANGE = 20;
 
-/** 非战斗 creep 感到危险的距离。入侵者带远程攻击，射程 3，留点余量 */
-const FLEE_RANGE = 6;
+/**
+ * 开始逃命的距离（寻路步数，不是直线）。
+ *
+ * 入侵者远程射程 3，再留反应和堵路余量。隔墙直线很近但绕不过来的不算威胁。
+ *
+ * 停逃必须更远（FLEE_CLEAR），否则刚跑出触发圈就回头干活，
+ * 下一 tick 又进圈——表现为"逃着逃着就不逃了"，最后被追上磨死。
+ */
+const FLEE_TRIGGER = 8;
 
-/** 撤退时一次最多算这么多步，逃命不值得花大钱寻路 */
-const FLEE_OPS = 500;
+/** 撤到离所有武装敌人至少这么远（寻路）才允许停逃、恢复干活 */
+const FLEE_CLEAR = 14;
+
+/** 撤退 / 测威胁距离时一次最多算这么多步 */
+const FLEE_OPS = 2000;
 
 /**
  * 会打人的部件。
@@ -298,25 +309,151 @@ function rallyPoint(room: Room): RoomPosition | undefined {
  */
 export function evade(creep: Creep): boolean {
   const threat = threatOf(creep.room);
-  if (threat.armed.length === 0 || threat.towered) return false;
+  if (threat.armed.length === 0 || threat.towered) {
+    delete creep.memory.fleeing;
+    return false;
+  }
 
-  const danger = threat.armed.filter(hostile => creep.pos.getRangeTo(hostile) <= FLEE_RANGE);
-  if (danger.length === 0) return false;
+  const nearest = nearestArmedWalkRange(creep.pos, threat.armed, creep.room);
+  if (!shouldKeepFleeing(nearest, Boolean(creep.memory.fleeing))) {
+    delete creep.memory.fleeing;
+    return false;
+  }
 
-  const escape = PathFinder.search(
-    creep.pos,
-    danger.map(hostile => ({ pos: hostile.pos, range: FLEE_RANGE })),
-    { flee: true, maxOps: FLEE_OPS, plainCost: 2, swampCost: 10 }
-  );
-
+  creep.memory.fleeing = true;
   announce(creep, "逃");
-
-  const step = escape.path[0];
-  if (step) requestMove(creep, step);
-
   // 逃跑路线和平时的路径缓存冲突，留着下 tick 会被当成还在原路上走
   delete creep.memory.travel;
+
+  // 目标是全部武装敌人，不是只躲最近那个——否则会从 A 身边逃进 B 怀里
+  const escape = PathFinder.search(
+    creep.pos,
+    threat.armed.map(hostile => ({ pos: hostile.pos, range: FLEE_CLEAR })),
+    {
+      flee: true,
+      maxOps: FLEE_OPS,
+      plainCost: 2,
+      swampCost: 10,
+      roomCallback: name => (name === creep.room.name ? costMatrixFor(creep.room) : false)
+    }
+  );
+
+  const step = escape.path[0] ?? stepAway(creep.pos, threat.armed);
+  if (step) requestMove(creep, step);
   return true;
+}
+
+/**
+ * 离最近武装敌人的寻路距离。
+ *
+ * 直线距离是下界：已到安全线外就不必寻路；贴身（≤1）也同 getRangeTo。
+ * 中间那段才 PathFinder——隔墙绕不过去时是 Infinity，不会误触发逃命。
+ */
+export function nearestArmedWalkRange(
+  from: RoomPosition,
+  armed: { pos: RoomPosition }[],
+  room: Room
+): number {
+  let best = Infinity;
+
+  for (const hostile of armed) {
+    const straight = from.getRangeTo(hostile.pos);
+    if (straight >= best) continue;
+
+    if (straight <= 1) {
+      best = straight;
+      continue;
+    }
+
+    // 走路 ≥ 直线：直线已在安全线外，不必再算
+    if (straight >= FLEE_CLEAR) {
+      best = straight;
+      continue;
+    }
+
+    const walked = walkRangeTo(from, hostile.pos, room);
+    if (walked < best) best = walked;
+  }
+
+  return best;
+}
+
+/** 两点之间的寻路格数（与 getRangeTo 同口径）；走不到就是 Infinity */
+function walkRangeTo(from: RoomPosition, to: RoomPosition, room: Room): number {
+  const straight = from.getRangeTo(to);
+  if (straight <= 1) return straight;
+
+  const result = PathFinder.search(
+    from,
+    { pos: to, range: 1 },
+    {
+      maxOps: FLEE_OPS,
+      maxRooms: 1,
+      plainCost: 1,
+      swampCost: 1,
+      roomCallback: name => (name === room.name ? costMatrixFor(room) : false)
+    }
+  );
+
+  return walkRangeFromSearch(straight, result.path.length, result.incomplete);
+}
+
+/**
+ * 把寻路结果折成距离。path 不含起点；goal range=1 时 length+1 ≈ 开阔地 getRangeTo。
+ */
+export function walkRangeFromSearch(straight: number, pathLength: number, incomplete: boolean): number {
+  if (straight <= 1) return straight;
+  if (incomplete) return Infinity;
+  return pathLength + 1;
+}
+
+/** 离最近武装敌人的直线距离；邻格逃命评分用，不认墙 */
+export function nearestArmedRange(from: RoomPosition, armed: { pos: RoomPosition }[]): number {
+  let best = Infinity;
+  for (const hostile of armed) {
+    const range = from.getRangeTo(hostile.pos);
+    if (range < best) best = range;
+  }
+  return best;
+}
+
+/**
+ * 逃命滞回：进了触发圈就开始逃，撤出安全圈才停。
+ *
+ * 单阈值会抖——刚到安全线外一格就回去干活，敌人一步跟上来又触发，
+ * 来回晃几下就被贴身。
+ */
+export function shouldKeepFleeing(nearest: number, wasFleeing: boolean): boolean {
+  if (nearest <= FLEE_TRIGGER) return true;
+  if (wasFleeing && nearest < FLEE_CLEAR) return true;
+  return false;
+}
+
+/** PathFinder 没给出下一步时，朝离敌人更远的邻格硬挪一步 */
+function stepAway(from: RoomPosition, armed: { pos: RoomPosition }[]): RoomPosition | undefined {
+  let best: RoomPosition | undefined;
+  let bestScore = nearestArmedRange(from, armed);
+
+  for (let dx = -1; dx <= 1; dx++) {
+    for (let dy = -1; dy <= 1; dy++) {
+      if (dx === 0 && dy === 0) continue;
+      const x = from.x + dx;
+      const y = from.y + dy;
+      if (x <= 0 || x >= 49 || y <= 0 || y >= 49) continue;
+
+      const terrain = Game.map.getRoomTerrain(from.roomName).get(x, y);
+      if (terrain === TERRAIN_MASK_WALL) continue;
+
+      const next = new RoomPosition(x, y, from.roomName);
+      const score = nearestArmedRange(next, armed);
+      if (score > bestScore) {
+        best = next;
+        bestScore = score;
+      }
+    }
+  }
+
+  return best;
 }
 
 /**

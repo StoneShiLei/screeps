@@ -508,4 +508,11 @@ describe("产出被吃光时收编制", () => {
     assert.equal(quotaOf(backlogged, "upgrader"), 3);
     assert.equal(quotaOf(backlogged, "builder"), 0);
   });
+
+  it("storage 里有余量时不算吃紧，别误压升级编制", () => {
+    const buffered = room(100, 90, 0);
+    (buffered as { storage?: { store: { energy: number } } }).storage = { store: { energy: 5000 } };
+
+    assert.equal(quotaOf(buffered, "upgrader"), 3, "仓里有货说明产线没塌");
+  });
 });

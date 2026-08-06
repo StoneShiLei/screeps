@@ -1,0 +1,14 @@
+---
+description: 改完 AI 逻辑后自动 push-main，并 probe 核对线上状态
+alwaysApply: true
+---
+
+# 发版与线上核对（默认）
+
+改动会影响游戏内行为时，**不要等用户再说「上线」**：
+
+1. `npm test` → `npm run lint` → `npm run push-main`（流程见 `screeps-ship` skill）
+2. 等若干 tick（约 30–60s），用 `screeps-live-state` 短 probe / roster 核对修前现象是否消失
+3. 把 probe 关键结论用中文简短回报；异常再改、再推、再探
+
+纯文档 / 纯本地单测 / 用户明确只要本地改不动线上时，可跳过上传。

@@ -1,6 +1,6 @@
 ---
 name: screeps-defense
-description: Debug Screeps local defenders, remote guardians, towers, ramparts, and NPC-vs-player threat handling. Use when rooms under attack, emergency defender spawn loops, guardians too slow, disarmed creeps stuck, colony relief, or tower/rampart repair issues.
+description: Debug Screeps local defenders, remote guardians, towers, ramparts, safe mode, and NPC-vs-player threat handling. Use when rooms under attack, safe mode activation, emergency defender spawn loops, guardians too slow, disarmed creeps stuck, colony relief, or tower/rampart repair issues.
 ---
 
 # Screeps 防御兵种
@@ -35,8 +35,15 @@ description: Debug Screeps local defenders, remote guardians, towers, ramparts, 
 
 安全优先：目标房有武装敌人时 `pioneerQuota` 冻结，先清场再派工人。
 
+## 安全模式
+
+- 触发：本 tick 事件日志里有关键己方建筑被毁（spawn/塔/extension/storage/…/rampart），且房间里有**武装**敌人。
+- 不触发：路/容器/墙朽掉或自拆；拆迁敌方建筑时只有无武装外人；无可用次数 / 冷却中 / 已在安全模式。
+- 入口：`managers/safeMode.ts` → `runSafeMode`，主循环里赶在塔之前。
+
 ## 塔与 rampart
 
+- 伤害衰减：≤5 → 600，≥20 → 150，每炮仍耗 10 能量。武装敌人开火距离 = `max(20, 塔到 controller + 5)`（盖住分房入口，避免 bunker↔controller 很远时丢控制器）；抢矿邻居仍 **10 格**；再远遛塔不开枪。
 - rampart **RCL5** 才开建（前期塔够用，rampart 贵且掉血）。
 - 塔修 rampart 用软上限（`rampartHitsTarget`），别按 `hitsMax` 三亿排优先级。
 - 只修图纸内 / spawn·塔上的 rampart。

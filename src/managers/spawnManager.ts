@@ -9,6 +9,8 @@ import {
   dismantlerQuota,
   isReserved,
   nextScoutTarget,
+  remoteDefenseTarget,
+  remoteEvictTarget,
   remoteHaulersNeeded,
   reserverQuota,
   unassignedBreachTarget,
@@ -16,7 +18,13 @@ import {
   unassignedReserveTarget
 } from "./remote";
 import { SUPPLY_PRIORITY, logisticsOf } from "./logistics";
-import { claimerQuota, colonyDefenders, expansionAssignment, pioneerQuota } from "./expansion";
+import {
+  claimerQuota,
+  colonyDefenders,
+  expansionAssignment,
+  expansionTarget,
+  pioneerQuota
+} from "./expansion";
 import { hostilesIn, localDefenderCount } from "../roles/defender";
 import { lootAssignment, looterQuota } from "./loot";
 import { blockedByIntruders } from "./demolish";
@@ -157,7 +165,20 @@ function guardianQuota(room: Room, counts: Record<CreepRole, number>): number {
   if (isChainBroken(counts)) return 0;
   if (hostilesIn(room).length > 0) return 0;
 
-  return colonyDefenders(room)?.count ?? 0;
+  const relief = colonyDefenders(room);
+  const defend = remoteDefenseTarget(room);
+  const evict = remoteEvictTarget(room);
+
+  // 分房驰援、外矿抗争、外矿驱赶可能同时亮且房间不同，缺口相加
+  let wanted = relief?.count ?? 0;
+  if (defend) {
+    if (!relief || relief.target !== defend.target) wanted += defend.count;
+    else wanted = Math.max(wanted, defend.count);
+  }
+  if (evict && (!relief || relief.target !== evict) && (!defend || defend.target !== evict)) {
+    wanted += 1;
+  }
+  return wanted;
 }
 
 /**
@@ -199,14 +220,15 @@ function desiredUpgraders(room: Room, sites: number): number {
 /**
  * 消费端已经把产出吃干了没有。
  *
- * 两个条件一起看才稳。矿边存货低于一趟运力，说明矿工挖出来的当场就被领走；粮仓
- * 同时见底，说明这不是搬运工刚好清空了一轮，而是真的一点余量都不剩。只看其中
- * 任何一个都会误判——粮仓在升级工换班的间隙也会空，矿边存货在搬运工刚取完货的
- * 那一 tick 也是零，而配额抖动的代价是人派出去又派不满，两头都不划算。
+ * 矿边存货低 + 粮仓见底才算吃紧。有 storage 且仓里还有余量时不算——能量进仓
+ * 之后矿边 backlog 会掉、粮仓也可能低，那是物流在囤货，不是产线塌了。
  *
  * 粮仓还没建出来时不下这个结论：那时候没有这个信号，宁可让别的闸去管。
  */
 function isStarved(room: Room): boolean {
+  const stored = room.storage?.store[RESOURCE_ENERGY] ?? 0;
+  if (stored >= GRANARY_LOW) return false;
+
   const granary = granaryEnergy(room);
   if (granary === undefined) return false;
 
@@ -224,8 +246,8 @@ function granaryEnergy(room: Room): number | undefined {
 /**
  * 控制器旁的容器是不是满了。
  *
- * 那个容器只进不出——只有升级工从里面取——所以它满着是个很干净的信号：
- * 能量供大于求，而 storage 要 RCL4 才有，多出来的现在无处可去。
+ * 那个容器只进不出——只有升级工从里面取——所以它满着说明运进来的不比烧掉的少。
+ * 有 storage 之后溢出进仓，这个信号仍表示升级侧吃得饱，用来维持编制即可。
  */
 function isGranaryFull(room: Room): boolean {
   const spot = room.memory.upgradeSpot;
@@ -293,14 +315,15 @@ export const SPAWN_PRIORITY: CreepRole[] = [
   // 搬仓库有时间窗，但排在本房建造之后：先把家里的 extension 立起来，
   // 搬回来的能量才有地方花、有更大的孵化预算
   "looter",
+  // 预定员：一到位外矿产能翻倍，断档比晚派一个 pioneer / upgrader 疼得多。
+  // 排在建造和占领之后、扶持/升级之前——建造高峰期别再把它挤到队列尾巴上，
+  // 不然双 CLAIM 按余量补员会在通勤尽头踩空（E27S36 预定剩 25 tick 才赶到）
+  "reserver",
   // 拓荒者：分房扶持重要，但主房建筑没铺完时配额会被压住（见 pioneerQuota），
   // 就算亮了也排在 builder 后面
   "pioneer",
   "upgrader",
   "scout",
-  // 预定员排在外矿的矿工和运输队前面：它一到位，那个房间所有源的产能立刻翻倍，
-  // 是整条外矿链上单位投入产出最高的一环
-  "reserver",
   "remoteMiner",
   "remoteHauler",
   // 拆迁工排最后。它砸开的那段墙能让整个外矿产能翻倍，但那是几百 tick 之后的事，
@@ -376,7 +399,8 @@ function spawnCreep(spawn: StructureSpawn, role: CreepRole, isEmergency: boolean
   const room = spawn.room;
   const assignment = assignmentFor(room, role);
   const budget = isEmergency ? room.energyAvailable : room.energyCapacityAvailable;
-  const body = bodyFor(role, budget, repeatLimitFor(room, role, assignment));
+  // 传入 RCL：本房 hauler/builder 在平原路解锁前（RCL<4）改用无路满速体型
+  const body = bodyFor(role, budget, repeatLimitFor(room, role, assignment), room.controller?.level);
   const name = `${role}_${Game.time}`;
 
   const result = spawn.spawnCreep(body, name, {
@@ -412,17 +436,57 @@ function assignmentFor(room: Room, role: CreepRole): Partial<CreepMemory> {
     return target ? { targetRoom: target } : {};
   }
 
-  // 分房只有一个目标，占领者和拓荒者都往那儿去，不用挑
-  if (role === "claimer" || role === "pioneer") return expansionAssignment(room);
+  // 占领者只认分房目标；拓荒者还可能去外矿铺路/扶持弱房，见 expansionAssignment
+  if (role === "claimer") {
+    const target = expansionTarget(room);
+    return target ? { targetRoom: target } : {};
+  }
+  if (role === "pioneer") return expansionAssignment(room);
   if (role === "looter") return lootAssignment(room);
 
-  // 协防兵在孵化那一刻就认下要去的分房；早期防御兵永远留在本土，不带 targetRoom
+  // 协防兵认分房驰援、外矿抗争或驱赶；早期防御兵永远留在本土，不带 targetRoom
   if (role === "guardian") {
-    const relief = colonyDefenders(room);
-    return relief ? { targetRoom: relief.target } : {};
+    const targetRoom = pickGuardianTarget(room);
+    return targetRoom ? { targetRoom } : {};
   }
 
   return {};
+}
+
+/**
+ * 协防兵下一趟该去哪：分房驰援 → 外矿武装抗争 → 外矿驱赶。
+ *
+ * 孵化认领和清场后重新派活共用这一份，免得闲兵停在分房门口、外矿却没人去打。
+ */
+function pickGuardianTarget(home: Room): string | undefined {
+  const relief = colonyDefenders(home);
+  const defend = remoteDefenseTarget(home);
+  const evict = remoteEvictTarget(home);
+  const headed = (target: string) =>
+    Object.values(Game.creeps).some(
+      creep =>
+        creep.memory.role === "guardian" &&
+        creep.memory.room === home.name &&
+        creep.memory.targetRoom === target
+    );
+
+  if (relief && !headed(relief.target)) return relief.target;
+  if (defend && !headed(defend.target)) return defend.target;
+  if (evict && !headed(evict)) return evict;
+  if (relief) return relief.target;
+  if (defend) return defend.target;
+  if (evict) return evict;
+  return undefined;
+}
+
+/** 清场后丢掉 targetRoom 的协防兵，有新活就重新挂上 */
+export function ensureGuardianDuty(creep: Creep): void {
+  if (creep.memory.targetRoom) return;
+  const home = Game.rooms[creep.memory.room];
+  if (!home) return;
+
+  const target = pickGuardianTarget(home);
+  if (target) creep.memory.targetRoom = target;
 }
 
 /**

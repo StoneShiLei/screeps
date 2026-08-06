@@ -27,6 +27,7 @@ import { loadByRole, spawnLoadOf } from "../managers/spawnLoad";
 import { lootPiles, lootStatus, startLoot, stopLoot } from "../managers/loot";
 import { flagHelpText } from "../managers/flags";
 import { logisticsOf } from "../managers/logistics";
+import { CPU_IDLE_RATIO, PIXEL_BUCKET, pixelsEnabled, setPixelsEnabled } from "../managers/pixels";
 import { planRoom } from "../planner/roomPlanner";
 import { spawnQueue } from "../managers/spawnManager";
 
@@ -84,6 +85,27 @@ export const COMMANDS: Record<string, Command> = {
     usage: "debug.status()",
     describe: "查看当前调试设置",
     run: () => statusText()
+  },
+  "pixels.on": {
+    usage: "pixels.on()",
+    describe: "打开空闲时搓像素（默认开）",
+    run: () => {
+      setPixelsEnabled(true);
+      return "搓像素 → 开";
+    }
+  },
+  "pixels.off": {
+    usage: "pixels.off()",
+    describe: "关闭空闲时搓像素",
+    run: () => {
+      setPixelsEnabled(false);
+      return "搓像素 → 关";
+    }
+  },
+  "pixels.status": {
+    usage: "pixels.status()",
+    describe: "查看搓像素开关、桶和近期 CPU",
+    run: () => pixelsStatusText()
   },
   replan: {
     usage: "replan(room)",
@@ -434,6 +456,12 @@ export function installCommands(): void {
   loot.stop = (room?: string) => COMMANDS["loot.stop"].run(room ?? "");
   loot.scan = (target: string) => COMMANDS["loot.scan"].run(target);
   g.loot = loot;
+
+  g.pixels = {
+    on: () => COMMANDS["pixels.on"].run(),
+    off: () => COMMANDS["pixels.off"].run(),
+    status: () => COMMANDS["pixels.status"].run()
+  };
   /* eslint-enable @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access */
 }
 
@@ -467,6 +495,18 @@ function statusText(): string {
     "\n"
   );
   return `日志级别：${current.level}\nsay：${current.say ? "开" : "关"}\n可视化：\n${visuals}`;
+}
+
+function pixelsStatusText(): string {
+  const avg = Memory.cpu?.avg;
+  const avgText = avg === undefined ? "未采样" : avg.toFixed(1);
+  const limit = Game.cpu.limit;
+  const threshold = (limit * CPU_IDLE_RATIO).toFixed(1);
+  return [
+    `开关：${pixelsEnabled() ? "开" : "关"}`,
+    `桶：${Game.cpu.bucket}/${PIXEL_BUCKET}`,
+    `近期 CPU：${avgText} / limit ${limit}（空闲门槛 < ${threshold}）`
+  ].join("\n");
 }
 
 function parseBool(value: string): boolean | undefined {

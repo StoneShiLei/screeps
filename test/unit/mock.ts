@@ -5,6 +5,12 @@ export const Game: {
   flags: { [name: string]: any };
   map: any;
   time: any;
+  cpu: {
+    bucket: number;
+    limit: number;
+    getUsed: () => number;
+    generatePixel?: () => number;
+  };
   getObjectById: (id: string) => any;
 } = {
   creeps: {},
@@ -17,6 +23,12 @@ export const Game: {
     getRoomLinearDistance: () => 1
   },
   time: 12345,
+  // 搓像素和采样都会读；默认桶不满、不提供 generatePixel，单测不会误搓
+  cpu: {
+    bucket: 0,
+    limit: 20,
+    getUsed: () => 1
+  },
   getObjectById: () => null
 };
 
@@ -76,6 +88,7 @@ const VALUE_CONSTANTS: Record<string, string | number> = {
   CLAIM: "claim",
   CARRY_CAPACITY: 50,
   LOOK_STRUCTURES: "structure",
+  LOOK_CREEPS: "creep",
   LOOK_CONSTRUCTION_SITES: "constructionSite",
   // 地形掩码：外矿落点规划会读，数值照抄引擎
   TERRAIN_MASK_WALL: 1,
@@ -84,7 +97,8 @@ const VALUE_CONSTANTS: Record<string, string | number> = {
   OK: 0,
   ERR_NOT_IN_RANGE: -9,
   ERR_NOT_ENOUGH_RESOURCES: -6,
-  ERR_FULL: -8
+  ERR_FULL: -8,
+  EVENT_OBJECT_DESTROYED: 2
 };
 
 export function installGameConstants(): void {

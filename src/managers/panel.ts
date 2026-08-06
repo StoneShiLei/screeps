@@ -10,6 +10,7 @@ import { DEMAND_PRIORITY, LogisticsEntry, SUPPLY_PRIORITY, logisticsOf } from ".
 import { isRemotePaused, reserveLeft } from "./remote";
 import { decodeCells } from "../planner/roads";
 import { expansionStatus } from "./expansion";
+import { hostilesIn } from "../roles/defender";
 import { isVisualOn } from "../utils/settings";
 import { lootStatus } from "./loot";
 import { pendingSiteCount } from "../planner/roomPlanner";
@@ -175,18 +176,16 @@ function buildLines(room: Room, controller: StructureController): PanelLine[] {
 }
 
 /**
- * 物流一行：等着被运走的货，和等着被填满的坑。
+ * 物流一行：积压、急缺、和房间里能拿出来用的能量。
  *
- * 这两个数就是判断运力够不够的全部依据。待运一直压着不降，说明 hauler 太少
- * 或者跑太远；缺口一直是零而待运很高，那是能量没处送——多半该多派升级工了。
+ * 待运只算地上的和矿边容器：口径和 hauler 编制用的 backlog 一致。storage /
+ * 缓冲不算积压——那是库存，不是运不完的货。
  *
- * 待运只算地上的和矿边容器里的，storage 里的存货不算：那是攒着备用的，
- * 不是积压。口径和 spawnManager 决定 hauler 人数时用的完全一致。
+ * 缺口只算 spawn、extension、tower。容器和 storage 的空位不掺进来，否则常年
+ * 几千看着像要断供。
  *
- * 缺口只算 spawn、extension 和 tower，容器和 storage 的空位另算成"囤"。
- * 全部求和的口径会骗人：控制器旁那个桶和 bunker 里的缓冲桶各有 2000 容量，而它们
- * 按定义就该是没填满的状态，于是缺口常年显示四千上下——看着像随时要断供，实际
- * spawn 和 extension 一点不缺。真正会让房间停摆的只有前三种。
+ * 可用 = 物流供给侧合计：掉落、墓碑、矿边桶、缓冲桶、storage 等凡是能 withdraw /
+ * pickup 出来干活的能量。
  */
 function logisticsLine(room: Room): PanelLine {
   const { supplies, demands } = logisticsOf(room);
@@ -195,26 +194,25 @@ function logisticsLine(room: Room): PanelLine {
     .filter(entry => entry.priority <= SUPPLY_PRIORITY.source)
     .reduce((sum, entry) => sum + entry.amount, 0);
 
-  const { missing, stashing } = splitDemands(demands);
-  const stash = stashing > 0 ? ` 囤 ${stashing}` : "";
+  const missing = urgentDemand(demands);
+  const usable = usableEnergy(supplies);
 
   return {
-    text: `待运 ${waiting} 缺口 ${missing}${stash}`,
+    text: `待运 ${waiting} 缺口 ${missing} 可用 ${usable}`,
     color: waiting > BACKLOG_WARN ? "#ffaa44" : "#aaccaa"
   };
 }
 
-/** 把需求分成"填不上就停摆的"和"只是囤着的"两摊 */
-export function splitDemands(demands: LogisticsEntry[]): { missing: number; stashing: number } {
-  let missing = 0;
-  let stashing = 0;
+/** spawn / extension / tower 还缺多少——填不上房间就停摆 */
+export function urgentDemand(demands: LogisticsEntry[]): number {
+  return demands
+    .filter(entry => entry.priority <= DEMAND_PRIORITY.tower)
+    .reduce((sum, entry) => sum + entry.amount, 0);
+}
 
-  for (const entry of demands) {
-    if (entry.priority <= DEMAND_PRIORITY.tower) missing += entry.amount;
-    else stashing += entry.amount;
-  }
-
-  return { missing, stashing };
+/** 房间里能取出来干活的能量（物流供给侧合计，含 storage / 缓冲） */
+export function usableEnergy(supplies: LogisticsEntry[]): number {
+  return supplies.reduce((sum, entry) => sum + entry.amount, 0);
 }
 
 /**
@@ -271,6 +269,10 @@ function remoteLine(room: Room): PanelLine | undefined {
  */
 function remoteMark(roomName: string, paused: boolean): string {
   if (paused) return "(停)";
+
+  // 有视野且在抗争：打得过所以没进冷却，派了 guardian
+  const visible = Game.rooms[roomName];
+  if (visible && hostilesIn(visible).length > 0) return "(抗)";
 
   const breach = Memory.rooms[roomName]?.breach;
   if (breach) return breach.wall ? `(墙${Math.ceil(breach.hits / 1000)}k)` : "(封死)";

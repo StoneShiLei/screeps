@@ -26,11 +26,14 @@ npm run push-main
 
 PowerShell 不要用 `&&` 链命令（旧版会解析失败）；用 `;` 或分行。
 
-## 上传后
+## 上传后（默认必做）
 
-1. 等若干 tick（upload 后下一 tick 才加载新代码）。
-2. 用 `screeps-live-state` 做短 probe / `roster`，对照修前现象。
-3. 能量物流类问题对照 `screeps-logistics`。
+用户要求改完自动上线并核对时（项目规则 `ship-and-verify`）：
+
+1. 等约 30–60s（upload 后下一 tick 才加载新代码；再跑几 tick 才看得出行为）。
+2. 用 `screeps-live-state` 短 probe / `roster`，对照修前现象与预期字段。
+3. 能量物流类问题对照 `screeps-logistics`；把结论回报用户。
+4. 查完还原 `tools/probe.expr.js`（勿提交）。
 
 ## 注意
 

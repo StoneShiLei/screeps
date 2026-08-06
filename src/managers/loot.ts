@@ -28,14 +28,15 @@ const LOOT_TYPES: StructureConstant[] = ["terminal", "storage", "spawn", "tower"
 /**
  * 最多派几个搬运工，取决于家里放不放得下。
  *
- * 有 storage 是分水岭。没有它的时候，运回来的能量只能进 spawn、extension 和
- * 控制器容器，加起来几千点就满了，之后的出口只有升级速度——四个人运回来的货
- * 大半只能背在身上，等于花四份孵化费雇了四个会走路的仓库。
- *
- * 有了 storage 就是一百万容量的坑，运多少都吃得下，这才轮到"多派人多赚"。
+ * 没有 storage（或仓里还没站稳）时，运回来的能量只能进 spawn、extension 和
+ * 控制器容器，加起来几千点就满了——四个人运回来的货大半只能背在身上。
+ * 仓里攒够一笔垫底之后才放开满编，空仓落地瞬间不抢孵化时间。
  */
 const LOOT_CREW_WITH_STORAGE = 4;
 const LOOT_CREW_BARE = 2;
+
+/** storage 至少攒这么多才算"放得下"，满编 loot 才开 */
+const LOOT_STORAGE_READY = 5000;
 
 /** 少于这么多就不值得再专门派人，剩下的零头让路过的顺手带走 */
 const LOOT_FLOOR = 200;
@@ -165,7 +166,8 @@ export function looterQuota(home: Room): number {
   if (left < LOOT_FLOOR) return 0;
 
   const capacity = looterCapacity(home);
-  const crew = home.storage ? LOOT_CREW_WITH_STORAGE : LOOT_CREW_BARE;
+  const stored = home.storage?.store[RESOURCE_ENERGY] ?? 0;
+  const crew = home.storage && stored >= LOOT_STORAGE_READY ? LOOT_CREW_WITH_STORAGE : LOOT_CREW_BARE;
   const wanted = Math.min(crew, Math.max(1, Math.ceil(left / capacity / TRIPS_PER_CREW)));
 
   const alive = ourLooters(home).length;

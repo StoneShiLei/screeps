@@ -49,6 +49,29 @@ function home(memory: Partial<RoomMemory> = {}, storedEnergy?: number): Room {
   } as unknown as Room;
 }
 
+/** 挂一个缺容器的外矿，让 roadCrewTarget 认出来 */
+function stubRemoteNeedingContainer(roomName: string): void {
+  // activeRemoteSources 按 tick 缓存，换个 tick 免得吃到前面用例的空名单
+  Game.time = (Game.time ?? 0) + 1;
+  const spot = { x: 10, y: 10 };
+  Memory.rooms[roomName] = {
+    home: "W1N1",
+    sources: { src1: spot },
+    miningSpots: { src1: spot }
+  };
+  Game.rooms[roomName] = {
+    name: roomName,
+    memory: Memory.rooms[roomName],
+    getPositionAt: (x: number, y: number) => ({
+      x,
+      y,
+      roomName,
+      lookFor: () => []
+    }),
+    find: () => []
+  } as unknown as Room;
+}
+
 describe("分房体型", () => {
   it("占领者一个 CLAIM 配两个 MOVE，赶路才是它全部的价值", () => {
     const body = bodyFor("claimer", 1300);
@@ -65,12 +88,18 @@ describe("分房体型", () => {
     assert.equal(countPart(body, "move"), 1);
   });
 
-  it("拓荒者要自己挖自己建，三种部件等量", () => {
+  it("拓荒者满载平地也能 1t/格：MOVE 要盖住 WORK+满载 CARRY", () => {
     const body = bodyFor("pioneer", 800);
 
-    assert.equal(countPart(body, "work"), 4);
-    assert.equal(countPart(body, "carry"), 4);
-    assert.equal(countPart(body, "move"), 4);
+    // 一组 W+C+M+M=250；800 买三组。空 CARRY 不计重，但满载后非 MOVE=6、MOVE=6
+    assert.equal(countPart(body, "work"), 3);
+    assert.equal(countPart(body, "carry"), 3);
+    assert.equal(countPart(body, "move"), 6);
+    assert.isAtLeast(
+      countPart(body, "move"),
+      countPart(body, "work") + countPart(body, "carry"),
+      "满载平原每非 MOVE 产 2 疲劳，每个 MOVE 消 2，必须 MOVE ≥ WORK+CARRY"
+    );
   });
 
   it("搬运工只有 CARRY 和 MOVE，一比一", () => {
@@ -198,6 +227,28 @@ describe("分房阶段", () => {
     assert.equal(pioneerQuota(room), 2, "按 grow 留守人数继续扶，不依赖 expansion 记录");
     assert.deepEqual(expansionAssignment(room), { targetRoom: "W1N2" });
     assert.include(expansionStatus(room) ?? "", "扶持中");
+  });
+
+  it("本房核心建造进行中仍派外矿路队：容器工地不能跟着 extension 一起冻死", () => {
+    stubRemoteNeedingContainer("W1N0");
+    const room = home({ remotes: ["W1N0"] });
+    room.find = (type: number) => {
+      if (type === FIND_MY_SPAWNS) return [{}];
+      if (type === FIND_MY_CONSTRUCTION_SITES) return [{ structureType: "extension" }];
+      return [];
+    };
+
+    assert.equal(pioneerQuota(room), 1, "路队一格名额，不跟本房 builder 抢能量");
+    assert.deepEqual(expansionAssignment(room), { targetRoom: "W1N0" });
+  });
+
+  it("分房 grow 时外矿路队仍优先占一个名额", () => {
+    stubRemoteNeedingContainer("W1N0");
+    Game.rooms.W1N2 = colony({ mine: true, spawns: 1 }) as Room;
+    const room = home({ expansion: { target: "W1N2", since: 1 }, remotes: ["W1N0"] });
+
+    assert.isAtLeast(pioneerQuota(room), 3, "grow 留守 2 + 路队 1");
+    assert.deepEqual(expansionAssignment(room), { targetRoom: "W1N0" }, "先填外矿容器再扶分房");
   });
 
   it("弱房建起塔之后经济扶持也停", () => {
@@ -485,11 +536,24 @@ describe("搬空前人的仓库", () => {
     assert.equal(looterQuota(home({ loot: "W1N2" })), 2);
   });
 
-  it("有了 storage 才放开到满编", () => {
+  it("storage 空着仍压两人：仓还没站稳不抢孵化", () => {
     Memory.rooms.W1N2.lootLeft = 84_000;
-    const withStorage = { ...home({ loot: "W1N2" }), storage: {} } as unknown as Room;
+    const empty = {
+      ...home({ loot: "W1N2" }),
+      storage: { store: { energy: 0 } }
+    } as unknown as Room;
 
-    assert.equal(looterQuota(withStorage), 4, "一百万容量的坑，运多少都吃得下");
+    assert.equal(looterQuota(empty), 2);
+  });
+
+  it("storage 攒够垫底才放开到满编", () => {
+    Memory.rooms.W1N2.lootLeft = 84_000;
+    const withStorage = {
+      ...home({ loot: "W1N2" }),
+      storage: { store: { energy: 5000 } }
+    } as unknown as Room;
+
+    assert.equal(looterQuota(withStorage), 4, "仓里有底了再多派人多赚");
   });
 
   it("只剩零头就不专门派人了", () => {

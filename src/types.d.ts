@@ -45,6 +45,11 @@ interface CreepMemory {
   /** announce 上次喊过的内容，一样就不重复喊 */
   lastSay?: string;
   /**
+   * 正在逃命。有滞回：进了危险圈才置位，撤到安全距离以外才清掉，
+   * 免得刚跑出 6 格就回头干活、再被追上磨死。
+   */
+  fleeing?: boolean;
+  /**
    * 外派 creep 的目标房间。
    *
    * 和 room 是两回事：room 是它归哪个基地管（配额、物流都按这个算），
@@ -64,11 +69,17 @@ interface Console {
 }
 
 interface Memory {
-  /** 调试开关：日志级别、可视化模块、say */
+  /** 调试开关：日志级别、可视化模块、say、搓像素 */
   settings?: {
     level?: "error" | "warn" | "info" | "debug";
     visuals?: Partial<Record<"movement" | "logistics" | "planner" | "spawn" | "panel", boolean>>;
     say?: boolean;
+    /** 默认开；设为 false 停止空闲搓像素 */
+    pixels?: boolean;
+  };
+  /** 近期 CPU 用量平滑值，供搓像素判断是否空闲 */
+  cpu?: {
+    avg?: number;
   };
 }
 
