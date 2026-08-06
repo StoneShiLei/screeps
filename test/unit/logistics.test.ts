@@ -516,6 +516,74 @@ describe("缓冲桶补货区间", () => {
   });
 });
 
+describe("建造期抽空控制器粮仓", () => {
+  let saved: { Game: unknown; Memory: unknown };
+
+  beforeEach(() => {
+    installGameConstants();
+    const context = global as unknown as typeof saved;
+    saved = { Game: context.Game, Memory: context.Memory };
+
+    context.Game = { creeps: {}, rooms: {}, time: Math.floor(Math.random() * 1e6), getObjectById: () => null };
+    context.Memory = { rooms: {}, creeps: {} };
+  });
+
+  afterEach(() => {
+    Object.assign(global, saved);
+  });
+
+  function roomWithGranary(energy: number, sites: number): Room {
+    const spot = { x: 14, y: 21 };
+    const granary = {
+      id: "粮仓",
+      structureType: "container",
+      pos: spot,
+      store: {
+        energy,
+        getFreeCapacity: () => 2000 - energy,
+        getCapacity: () => 2000
+      }
+    };
+
+    return {
+      name: `W${Math.floor(Math.random() * 1e6)}N1`,
+      // ticksToDowngrade 给足，别误触防降级
+      controller: { level: 4, my: true, ticksToDowngrade: 30000 },
+      memory: { upgradeSpot: spot },
+      find: (type: number) => {
+        if (type === FIND_STRUCTURES) return [granary];
+        if (type === FIND_MY_CONSTRUCTION_SITES) {
+          return Array.from({ length: sites }, (_, i) => ({ id: `site${i}`, structureType: "extension" }));
+        }
+        return [];
+      }
+    } as unknown as Room;
+  }
+
+  it("有工地时粮仓挂成供给，别把几百点锁在升级工嘴里", () => {
+    // 建造优先停了升级工、又不往粮仓灌——旧逻辑还把它从供给表里划掉，
+    // 518 就永远卡在桶里。开放成缓冲档，让 builder / 搬运工抽空去造
+    const { supplies, demands } = logisticsOf(roomWithGranary(518, 3));
+
+    assert.isUndefined(
+      demands.find(demand => demand.id === "粮仓"),
+      "建造期不往粮仓灌"
+    );
+    const supply = supplies.find(entry => entry.id === "粮仓");
+    assert.equal(supply?.amount, 518, "桶里的货该给建造用");
+    assert.equal(supply?.priority, SUPPLY_PRIORITY.buffer);
+  });
+
+  it("没工地时粮仓仍是升级工私产，不进供给表", () => {
+    const { supplies } = logisticsOf(roomWithGranary(518, 0));
+
+    assert.isUndefined(
+      supplies.find(entry => entry.id === "粮仓"),
+      "恢复喂粮仓之后别让搬运工把升级工的饭端走"
+    );
+  });
+});
+
 describe("缓冲桶需求档位", () => {
   it("有工地时提到和控制器粮仓同级", () => {
     assert.equal(bufferDemandPriority(1), DEMAND_PRIORITY.controller);

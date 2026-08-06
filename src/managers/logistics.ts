@@ -429,9 +429,18 @@ function collectSupplies(room: Room): LogisticsEntry[] {
     pushIfStocked(supplies, ruin, SUPPLY_PRIORITY.decaying);
   }
 
+  const sites = room.find(FIND_MY_CONSTRUCTION_SITES).length;
+  // 建造期不往粮仓灌（shouldFeedGranary=false），升级工也停手——那桶里剩的货
+  // 再不开放供给就会一直锁着（e28s36 的 518 就是这么卡死的）。开放成缓冲档，
+  // 给 builder / 搬运工抽空去造；恢复喂粮仓之后仍是升级工私产，谁都别掏。
+  const drainGranary = Boolean(upgradeSpot) && !shouldFeedGranary(room, sites);
+
   for (const structure of room.find(FIND_STRUCTURES)) {
     if (structure.structureType === STRUCTURE_CONTAINER) {
-      if (upgradeSpot && structure.pos.x === upgradeSpot.x && structure.pos.y === upgradeSpot.y) continue;
+      if (upgradeSpot && structure.pos.x === upgradeSpot.x && structure.pos.y === upgradeSpot.y) {
+        if (drainGranary) pushIfStocked(supplies, structure, SUPPLY_PRIORITY.buffer);
+        continue;
+      }
 
       if (isMiningSpot(structure.pos.x, structure.pos.y)) {
         pushIfStocked(supplies, structure, SUPPLY_PRIORITY.source);
@@ -486,8 +495,8 @@ function pushIfStocked(entries: LogisticsEntry[], holder: AnyStoreStructure | To
 /**
  * 已经认领的送货目标还收不收得下。
  *
- * 容器按 HIGH 判断：低于 LOW 才进表，但上路之后要允许一直补到 HIGH，
- * 否则送到 500 就撒手，滞回形同虚设。
+ * 容器按 HIGH 判断：没到 HIGH 仍算开口，上路之后允许一直补满，
+ * 否则送到一半就撒手，下一趟又得重跑。
  */
 function demandStillOpen(structure: AnyStoreStructure): boolean {
   if (structure.structureType === STRUCTURE_CONTAINER) {
@@ -529,13 +538,17 @@ function demandPriorityOf(structure: AnyStoreStructure, room: Room): number | un
   return undefined;
 }
 
-/** 已经认领的取货目标还有没有货（控制器粮仓是升级工的私产，谁都别去掏） */
+/** 已经认领的取货目标还有没有货 */
 function supplyStillOpen(target: LogisticsTarget, room: Room): boolean {
   if (isDropped(target)) return target.amount >= MIN_PICKUP_AMOUNT;
 
   if (isStoreContainer(target)) {
     const spot = room.memory.upgradeSpot;
-    if (spot && target.pos.x === spot.x && target.pos.y === spot.y) return false;
+    if (spot && target.pos.x === spot.x && target.pos.y === spot.y) {
+      // 喂粮仓期间是升级工私产；建造期抽空时才允许继续认领
+      const sites = room.find(FIND_MY_CONSTRUCTION_SITES).length;
+      if (shouldFeedGranary(room, sites)) return false;
+    }
   }
 
   return target.store[RESOURCE_ENERGY] >= MIN_PICKUP_AMOUNT;
