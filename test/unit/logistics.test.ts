@@ -7,8 +7,10 @@ import {
   chooseEntry,
   deductReservations,
   feedingSpawn,
-  hasHaulers
+  hasHaulers,
+  logisticsOf
 } from "../../src/managers/logistics";
+import { BUNKER_STRUCTURES } from "../../src/planner/bunkerLayout";
 import { bodyCost, bodyFor } from "../../src/utils/body";
 import { gatherEnergy } from "../../src/utils/energy";
 import { haulersForBacklog } from "../../src/managers/spawnManager";
@@ -205,8 +207,8 @@ describe("让位给 spawn", () => {
     };
   }
 
-  /** 造一个房间：一个 spawn 和一个矿边容器，两边的存量由参数决定 */
-  function roomWith(spawnEnergy: number, containerEnergy: number): Room {
+  /** 造一个房间：一个 spawn 和一个矿边容器，存量由参数决定；给了 bufferEnergy 就再摆一个缓冲桶 */
+  function roomWith(spawnEnergy: number, containerEnergy: number, bufferEnergy?: number): Room {
     const spawn = {
       id: "spawn1",
       structureType: "spawn",
@@ -219,6 +221,14 @@ describe("让位给 spawn", () => {
       pos: { x: SPOT.x, y: SPOT.y },
       store: store(containerEnergy, 2000)
     };
+    const buffer = {
+      id: "缓冲桶",
+      structureType: "container",
+      pos: { x: 21, y: 21 },
+      store: store(bufferEnergy ?? 0, 2000)
+    };
+
+    const structures = bufferEnergy === undefined ? [spawn, container] : [spawn, container, buffer];
 
     const room = {
       // 供需表按房间名和 tick 缓存，每次换个名字免得串味
@@ -226,13 +236,17 @@ describe("让位给 spawn", () => {
       memory: { miningSpots: { s1: SPOT } },
       find: (type: number) => {
         if (type === FIND_MY_STRUCTURES) return [spawn];
-        if (type === FIND_STRUCTURES) return [spawn, container];
+        if (type === FIND_STRUCTURES) return structures;
         return [];
       }
     } as unknown as Room;
 
     // claimSupply 会按 id 取回对象，还要比对它在不在同一个房间里
-    const objects: Record<string, unknown> = { spawn1: { ...spawn, room }, 矿边桶: { ...container, room } };
+    const objects: Record<string, unknown> = {
+      spawn1: { ...spawn, room },
+      矿边桶: { ...container, room },
+      缓冲桶: { ...buffer, room }
+    };
     (global as unknown as { Game: { getObjectById: (id: string) => unknown } }).Game.getObjectById = id =>
       objects[id] ?? null;
 
@@ -319,10 +333,10 @@ describe("让位给 spawn", () => {
     assert.deepEqual(did.withdrew, ["矿边桶"]);
   });
 
-  it("房间里有搬运工时也让开矿边桶，哪怕 spawn 已经满了", () => {
+  it("有搬运工、缓冲桶里也有货时让开矿边桶", () => {
     // 矿边桶是搬运工的收件箱。工人去认领会按空余容量把供给扣掉，搬运工于是
-    // 报"无货源"站着不动——桶里明明还有货
-    const room = roomWith(300, 2000);
+    // 报"无货源"站着不动——桶里明明还有货。工人该吃的是基地缓冲桶
+    const room = roomWith(300, 2000, 900);
     const context = global as unknown as { Game: { creeps: Record<string, unknown> } };
     context.Game.creeps = {
       hauler_1: { memory: { role: "hauler" }, room: { name: room.name } }
@@ -333,7 +347,39 @@ describe("让位给 spawn", () => {
 
     gatherEnergy(creep, true);
 
-    assert.isEmpty(did.withdrew);
+    assert.deepEqual(did.withdrew, ["缓冲桶"], "该从基地缓冲桶取，别去动搬运工的收件箱");
+    assert.equal(did.harvested, 0);
+  });
+
+  it("缓冲桶空了、spawn 又不缺货时，让位也得让工人吃上饭", () => {
+    // 让位是为了别把搬运工的收件箱认领光，可搬运工此刻并不缺这一桶：spawn 满着，
+    // 它没有更急的去处。这时候还让工人站着，就是纯亏工时——e28s36 的 builder
+    // 整房不动就是卡在这儿：粮仓阈值把 500~1500 那段锁死，缓冲桶等于空的
+    const room = roomWith(300, 2000, 0);
+    const context = global as unknown as { Game: { creeps: Record<string, unknown> } };
+    context.Game.creeps = {
+      hauler_1: { memory: { role: "hauler" }, room: { name: room.name } }
+    };
+
+    const { creep, did } = worker(room);
+
+    gatherEnergy(creep, true);
+
+    assert.deepEqual(did.withdrew, ["矿边桶"], "没有别的货源就自取，站着饿死不是让位");
+  });
+
+  it("spawn 还缺货时照旧死让：那一桶得留给搬运工填 extension", () => {
+    const room = roomWith(100, 2000, 0);
+    const context = global as unknown as { Game: { creeps: Record<string, unknown> } };
+    context.Game.creeps = {
+      hauler_1: { memory: { role: "hauler" }, room: { name: room.name } }
+    };
+
+    const { creep, did } = worker(room);
+
+    gatherEnergy(creep, true);
+
+    assert.isEmpty(did.withdrew, "spawn 缺货时搬运工比工人急，这桶不能抢");
     assert.equal(did.harvested, 0);
   });
 
@@ -399,6 +445,74 @@ describe("让位给 spawn", () => {
     };
 
     assert.isFalse(hasHaulers(room));
+  });
+});
+
+describe("缓冲桶补货区间", () => {
+  const ANCHOR = { x: 25, y: 25 };
+  /** 图纸里的缓冲桶位置：不在图纸上的容器不进需求表 */
+  const CELL = (() => {
+    const container = BUNKER_STRUCTURES.find(structure => structure.type === "container");
+    if (!container) throw new Error("布局表里没有容器");
+    return { x: ANCHOR.x + container.dx, y: ANCHOR.y + container.dy };
+  })();
+
+  let saved: { Game: unknown; Memory: unknown };
+
+  beforeEach(() => {
+    installGameConstants();
+    const context = global as unknown as typeof saved;
+    saved = { Game: context.Game, Memory: context.Memory };
+
+    context.Game = { creeps: {}, rooms: {}, time: Math.floor(Math.random() * 1e6), getObjectById: () => null };
+    context.Memory = { rooms: {}, creeps: {} };
+  });
+
+  afterEach(() => {
+    Object.assign(global, saved);
+  });
+
+  function roomWithBuffer(energy: number): Room {
+    const buffer = {
+      id: "缓冲桶",
+      structureType: "container",
+      pos: { x: CELL.x, y: CELL.y },
+      store: {
+        energy,
+        getFreeCapacity: () => 2000 - energy,
+        getCapacity: () => 2000
+      }
+    };
+
+    return {
+      name: `W${Math.floor(Math.random() * 1e6)}N1`,
+      memory: { anchor: ANCHOR },
+      find: (type: number) => (type === FIND_STRUCTURES ? [buffer] : [])
+    } as unknown as Room;
+  }
+
+  it("刚过 500 的桶照样挂在需求表上，一路补到 1500", () => {
+    // 旧逻辑两条线画在同一个数上：低于 500 才进需求表、高于 500 才算供给。桶于是
+    // 稳定停在五百出头——搬运工不认它，工人能取的又不够起送量，e28s36 的 builder
+    // 整房站着不动就是卡在这道缝里
+    const { demands } = logisticsOf(roomWithBuffer(542));
+
+    const buffer = demands.find(demand => demand.id === "缓冲桶");
+    assert.isDefined(buffer, "桶没装满就该一直缺货");
+    assert.equal(buffer?.amount, 1500 - 542, "缺口按补到 1500 算");
+  });
+
+  it("桶里的货工人全都能取，不留垫底", () => {
+    const { supplies } = logisticsOf(roomWithBuffer(542));
+
+    const buffer = supplies.find(supply => supply.id === "缓冲桶");
+    assert.equal(buffer?.amount, 542, "留底只会把工人饿住，它本来就是给工人现取现用的");
+  });
+
+  it("装满 1500 就退出需求表", () => {
+    const { demands } = logisticsOf(roomWithBuffer(1500));
+
+    assert.isEmpty(demands, "补够了就别再往里灌，运力该去别处");
   });
 });
 
@@ -721,8 +835,8 @@ describe("搬运工兜底投喂", () => {
       id: "粮仓",
       structureType: "container",
       pos: spot,
-      // 滞回下限 500，到了就不进需求表
-      store: store(500, 2000)
+      // 补到 1500 就不再进需求表
+      store: store(1500, 2000)
     };
     const spawn = {
       id: "spawn1",
@@ -793,7 +907,7 @@ describe("搬运工兜底投喂", () => {
 
   it("也投喂来扶持分房的拓荒者，别让它耗一半时间自己找饭", () => {
     const spot = { x: 14, y: 21 };
-    const granary = { id: "粮仓", structureType: "container", pos: spot, store: store(500, 2000) };
+    const granary = { id: "粮仓", structureType: "container", pos: spot, store: store(1500, 2000) };
     const spawn = { id: "spawn1", structureType: "spawn", pos: { x: 20, y: 20 }, store: store(300, 300) };
 
     const roomName = `W${Math.floor(Math.random() * 1e6)}N5`;

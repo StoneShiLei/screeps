@@ -22,6 +22,7 @@ import { CLAIM_LIFETIME, partsWeight, spawnHeadroom } from "./spawnLoad";
 import { blockedByIntruders, demolitionList } from "./demolish";
 import { defendersNeeded, hostilesIn } from "../roles/defender";
 import { bodyFor } from "../utils/body";
+import { hasCoreBuildPending } from "../planner/roomPlanner";
 import { log } from "../utils/logger";
 import { roadCrewTarget } from "./remote";
 import { worldRange } from "../utils/distance";
@@ -188,6 +189,10 @@ export function pioneerQuota(home: Room): number {
     const target = expansionTarget(home);
     if (target && underAttack(target)) return ourPioneers(home).length;
 
+    // 本房核心建筑没铺完时：建 spawn 那一档仍放行（没 spawn 分房永远起不来），
+    // grow / 扶持一律冻结——主房 extension 都没齐就去铺分房，两边都半吊子。
+    if (stage === "grow" && hasCoreBuildPending(home)) return ourPioneers(home).length;
+
     const cap = stage === "build" ? PIONEERS_SURGE : PIONEERS_GROW_SURGE;
     const base = stage === "build" ? PIONEERS_BUILDING : PIONEERS_GROWING;
     return affordable(home, surge(home, base, cap));
@@ -196,6 +201,9 @@ export function pioneerQuota(home: Room): number {
   // 没有进行中的分房记录时，扶持弱房和给外矿铺路这两笔活可能同时存在，要相加，
   // 不是二选一——旧写法 colonyBoost 一亮就 return，外矿的容器/路永远排不上人，
   // 表现就是"开了外矿却没人去建 container"。两笔需求各自的分派见 expansionAssignment。
+  // 本房核心建筑没铺完：扶持和外矿路队都先停，能量和孵化位留给本房 builder。
+  if (hasCoreBuildPending(home)) return ourPioneers(home).length;
+
   let wanted = 0;
   if (colonyBoostTarget(home)) wanted += surge(home, PIONEERS_GROWING, PIONEERS_GROW_SURGE);
   if (roadCrewTarget(home)) wanted += ROAD_CREW;

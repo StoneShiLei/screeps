@@ -688,6 +688,51 @@ function isBuilt(room: Room, site: PlannedSite): boolean {
   return position.lookFor(LOOK_STRUCTURES).some(structure => structure.structureType === site.type);
 }
 
+/**
+ * 影响运转效率的核心建筑。路和 rampart 另算——它们工程量大、排在队尾，
+ * 若也卡住升级/拓荒，房间会长期停在"永远建不完"，反而拖死 RCL 进度。
+ */
+const CORE_BUILD_TYPES: ReadonlySet<BuildableStructureConstant> = new Set([
+  "spawn",
+  "tower",
+  "extension",
+  "storage",
+  "container",
+  "terminal",
+  "link"
+]);
+
+/**
+ * 当前 RCL 还有没建完的核心建筑（含已拍工地、规划里还没拍到的）。
+ *
+ * 孵化/物流用它判断要不要进入"建造优先"模式：extension、tower、storage、
+ * 容器晚一天，整房效率差一截。路和 rampart 不算——工程量大、排在队尾，
+ * 算进去会长期卡死升级和拓荒。
+ */
+export function hasCoreBuildPending(room: Room): boolean {
+  if (
+    room
+      .find(FIND_MY_CONSTRUCTION_SITES)
+      .some(site => CORE_BUILD_TYPES.has(site.structureType))
+  ) {
+    return true;
+  }
+
+  const anchor = room.memory.anchor;
+  // 没锚点或缺少坐标查询时只信工地：规划扫描依赖 getPositionAt
+  if (!anchor || typeof room.getPositionAt !== "function") return false;
+
+  const level = room.controller?.level ?? 0;
+  // 不走 wantedSites 全表：那里面含路，而且 roadSites 要 getTerrain
+  const core = [
+    ...outpostSites(room),
+    ...bunkerSites(anchor, level),
+    ...defenseSites(room, anchor, level)
+  ];
+
+  return core.some(site => CORE_BUILD_TYPES.has(site.type) && !isBuilt(room, site));
+}
+
 function siteAt(room: Room, site: PlannedSite): ConstructionSite | undefined {
   const position = room.getPositionAt(site.x, site.y);
   // 同一格可能先有别的东西（极少见）；rampart 必须对上类型，不能被别的工地挡住重拍

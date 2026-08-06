@@ -133,6 +133,35 @@ describe("分房阶段", () => {
     assert.equal(pioneerQuota(room), 2);
   });
 
+  it("本房还有核心工地时冻结 grow 扶持：先铺完自家 extension", () => {
+    Game.rooms.W1N2 = colony({ mine: true, spawns: 1 }) as Room;
+    const room = home({ expansion: { target: "W1N2", since: 1 } });
+    // 主房 extension 没齐就去扶分房，两边都半吊子——这正是用户踩到的坑
+    room.find = (type: number) => {
+      if (type === FIND_MY_SPAWNS) return [{}];
+      if (type === FIND_MY_CONSTRUCTION_SITES) {
+        return [{ structureType: "extension" }, { structureType: "extension" }];
+      }
+      return [];
+    };
+
+    assert.equal(expansionStage(room), "grow");
+    assert.equal(pioneerQuota(room), 0, "本房建筑没铺完不加派拓荒者");
+  });
+
+  it("建 spawn 阶段不受本房工地影响：没 spawn 分房永远起不来", () => {
+    Game.rooms.W1N2 = colony({ mine: true, spawns: 0 }) as Room;
+    const room = home({ expansion: { target: "W1N2", since: 1 } });
+    room.find = (type: number) => {
+      if (type === FIND_MY_SPAWNS) return [{}];
+      if (type === FIND_MY_CONSTRUCTION_SITES) return [{ structureType: "extension" }];
+      return [];
+    };
+
+    assert.equal(expansionStage(room), "build");
+    assert.equal(pioneerQuota(room), 4, "建 spawn 是卡死点，本房建造让这一步");
+  });
+
   it("建 spawn 时老家攒够能量就堆到上限抢时间", () => {
     Game.rooms.W1N2 = colony({ mine: true, spawns: 0 }) as Room;
     const room = home({ expansion: { target: "W1N2", since: 1 } }, 150000);

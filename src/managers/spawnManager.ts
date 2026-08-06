@@ -22,8 +22,10 @@ import { lootAssignment, looterQuota } from "./loot";
 import { blockedByIntruders } from "./demolish";
 import { bodyFor } from "../utils/body";
 import { containerAt } from "../utils/structures";
+import { hasCoreBuildPending } from "../planner/roomPlanner";
 import { isVisualOn } from "../utils/settings";
 import { log } from "../utils/logger";
+import { needsDowngradeShield } from "../utils/controller";
 import { reliefSlots } from "./relief";
 import { sampleSpawnBusy } from "./spawnLoad";
 
@@ -37,18 +39,15 @@ const BACKLOG_PER_HAULER = 1500;
 /** 同时最多几个防御兵，再多也围不上同一个敌人 */
 const MAX_DEFENDERS = 3;
 
-/** 有工地时的升级工人数，压到刚够顶住降级 */
-const UPGRADER_BUSY = 2;
-
-/** 没工地时的升级工人数，能量没别处去就全推给控制器 */
+/** 核心建筑建完、能量没别处去时的升级工人数 */
 const UPGRADER_IDLE = 4;
 
-/** 产出被吃光时的最低编制：升级工留一个顶降级，建造留一个别彻底停工 */
+/** 产出被吃光、或只为顶降级时的最低编制 */
 const UPGRADER_STARVED = 1;
 const BUILDER_STARVED = 1;
 
-/** 有工地时的建造工人数 */
-const BUILDER_BUSY = 2;
+/** 有建造任务时的建造工人数：升级停手省下的能量正好多养一个 */
+const BUILDER_BUSY = 3;
 
 /**
  * 矿边存货低于这个数就算"挖出来当场被领走"。
@@ -164,12 +163,9 @@ function guardianQuota(room: Room, counts: Record<CreepRole, number>): number {
 /**
  * 升级工的人数看房间在忙什么。
  *
- * 早期收入撑不起两条战线：两个能量源加起来每 tick 才再生 20 点，而一个
- * 5 WORK 的 builder 全力施工就要烧 25 点。扩建期间把名额让给 builder，
- * 早一天建成 extension 和 container，之后每一 tick 的收入都更高。
- *
- * 但不能压到零——控制器有降级倒计时，没人续着会掉级，前面白干。
- * 工地清空之后再把人补回来，那时候能量没别的去处，全推给控制器。
+ * 每个 RCL 先把核心建筑铺完：extension / tower / storage / 容器晚一天，整房
+ * 运转差一截。建造期间升级工归零，只在快掉级时留一个顶住；核心建筑清空
+ * 之后再把人补回来全力推下一级。
  *
  * 最后再被站位数卡一道：控制器旁边站不下的人只能在外围干等，
  * 既升不了级又白吃孵化费。
@@ -185,14 +181,19 @@ function upgraderQuota(room: Room, sites: number): number {
 }
 
 function desiredUpgraders(room: Room, sites: number): number {
-  // 产出被吃光时收到最低。这条得排在最前面：粮仓满了要加人的判断是对称的，
-  // 而少了向下这一半，人数只会一路涨上去——桶被抽干之后编制还停在四个，
-  // 房间就稳定在超编状态，矿边永远见底，搬运工报"无货源"
+  // 快掉级时无论在不在建造，都得留一个人顶——掉一级建筑上限跟着缩，比慢建惨
+  if (needsDowngradeShield(room)) return UPGRADER_STARVED;
+
+  // 还在铺本级核心建筑：一个升级工都不养，能量全给 builder
+  if (sites > 0 || hasCoreBuildPending(room)) return 0;
+
+  // 产出被吃光时收到最低，别让编制卡在超编状态把矿边抽干
   if (isStarved(room)) return UPGRADER_STARVED;
 
-  // 粮仓满着说明运进来的比用掉的多，这时候压着人数就是让能量烂在容器里。
-  // 外矿一通就容易出现这种局面：收入涨了，出口还是原来那两个人
-  return sites > 0 && !isGranaryFull(room) ? UPGRADER_BUSY : UPGRADER_IDLE;
+  // 粮仓满着说明运进来的比用掉的多，这时候压着人数就是让能量烂在容器里
+  if (isGranaryFull(room)) return UPGRADER_IDLE;
+
+  return UPGRADER_IDLE;
 }
 
 /**
@@ -268,7 +269,9 @@ function haulerQuota(room: Room): number {
  *
  * harvester 排第二不是因为它效率高，恰恰相反——它只在搬运工断档时才有配额，
  * 那种时候需要的正是一个不依赖别人、自己挖自己送的角色来重启生产链。
- * builder 排在 upgrader 前面：有工地说明正在扩建，早点建完早点受益。
+ *
+ * builder 紧跟本土产线和协防：本级 extension / tower / storage 晚一天，整房
+ * 效率差一截。拓荒和搬仓都得让路——主房建筑没铺完就去扶分房，两边都半吊子。
  *
  * 外矿那三个排在全部本土角色之后。外矿是锦上添花，家里的产线还没配齐就
  * 往外派人，等于把本来该变成 extension 的能量拿去补一条更长更脆的运输线。
@@ -279,24 +282,20 @@ export const SPAWN_PRIORITY: CreepRole[] = [
   "miner",
   "hauler",
   // 协防兵排在本土产线三件套之后：老家先保住自己的挖—运—孵化闭环，再谈驰援。
-  // 它的配额本身已经卡了"老家没断链、本土没挨打"两道闸，能亮起来就说明家里有
-  // 余裕，这时候一个分房正等着救，比继续攒外矿和升级都急
+  // 它的配额本身已经卡了"老家没断链、本土没挨打"两道闸；守卫是分房唯一
+  // 压过本房建造的外援——没人扛着弱房会被打穿
   "guardian",
-  // 占领者插在这么前面，是因为它便宜得离谱而效果不可逆：700 能量、21 tick 孵化，
-  // 换来一个永久归属的房间。而"还没占下"这个状态是会被别人终结的——预定只能靠
-  // 一个 600 tick 寿命的 CLAIM 顶着，那期间隔壁随时可以自己占了它。
-  // 排在它后面的每一个角色都只是让产出快一点，没有一个是抢不回来就没了的
-  "claimer",
-  // 拓荒者紧跟占领者。刚占下的房间在它们到场之前是完全停摆的：一个 creep 都
-  // 造不出来，而占着建筑上限的前人旧房子也只有它们能拆（destroy 在房间里有
-  // 外人时用不了，dismantle 没这条限制）。搬运和建造都不缺人手就能推进，
-  // 只有这一环是"没人就彻底不动"
-  "pioneer",
-  // 搬仓库排在建造和升级前面。它是有时间窗的：那批货就在无主房间里敞着，
-  // 隔壁邻居也看得见，早一百 tick 到就多拉走几千点。而且它搬回来的正是
-  // builder 和 upgrader 要花的钱——先有收入，再谈开销
-  "looter",
+  // 本房建造工：每个 RCL 先把核心建筑铺完，再谈升级和对外扩张
   "builder",
+  // 占领者便宜且效果不可逆：700 能量换一个永久归属。排在建造之后——
+  // 家里 extension 都没齐时占了新房也养不起，但比拓荒者靠前：claim 窗口会被人截胡
+  "claimer",
+  // 搬仓库有时间窗，但排在本房建造之后：先把家里的 extension 立起来，
+  // 搬回来的能量才有地方花、有更大的孵化预算
+  "looter",
+  // 拓荒者：分房扶持重要，但主房建筑没铺完时配额会被压住（见 pioneerQuota），
+  // 就算亮了也排在 builder 后面
+  "pioneer",
   "upgrader",
   "scout",
   // 预定员排在外矿的矿工和运输队前面：它一到位，那个房间所有源的产能立刻翻倍，

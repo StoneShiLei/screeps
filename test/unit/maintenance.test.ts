@@ -438,7 +438,8 @@ describe("产出被吃光时收编制", () => {
 
     return {
       name: `W${Math.floor(Math.random() * 1e6)}N1`,
-      controller: { level: 4, my: true },
+      // ticksToDowngrade 给足，避免误触"快掉级"分支
+      controller: { level: 4, my: true, ticksToDowngrade: 30000 },
       energyAvailable: 800,
       energyCapacityAvailable: 800,
       memory: {
@@ -471,24 +472,40 @@ describe("产出被吃光时收编制", () => {
   it("矿边和粮仓同时见底就压到最低人数", () => {
     // 现场就是这个样子：三个桶各剩一百来点，而消费端每 tick 要烧 32 点，
     // 产能只有 20——不收编制的话房间会稳定停在这个状态
-    const starved = room(100, 90);
+    const starved = room(100, 90, 0);
 
     assert.equal(quotaOf(starved, "upgrader"), 1, "留一个顶住降级就够");
-    assert.equal(quotaOf(starved, "builder"), 1);
+    assert.equal(quotaOf(starved, "builder"), 0, "没工地不养建造工");
   });
 
-  it("粮仓还有余量就不收，那说明运进来的够花", () => {
-    const healthy = room(1000, 90);
+  it("有核心工地时升级工归零、建造工拉满：每个 RCL 先铺建筑", () => {
+    const building = room(1000, 90, 3);
 
-    assert.equal(quotaOf(healthy, "upgrader"), 2);
-    assert.equal(quotaOf(healthy, "builder"), 2);
+    assert.equal(quotaOf(building, "upgrader"), 0, "建造期不养升级工，能量全给 builder");
+    assert.equal(quotaOf(building, "builder"), 3);
+  });
+
+  it("建造期快掉级才留一个升级工顶住", () => {
+    const critical = room(1000, 90, 3);
+    (critical.controller as { ticksToDowngrade: number }).ticksToDowngrade = 5000;
+
+    assert.equal(quotaOf(critical, "upgrader"), 1, "RCL4 上限 40000，掉到 1/4 以下才顶");
+    assert.equal(quotaOf(critical, "builder"), 3);
+  });
+
+  it("核心建筑建完才放开升级工", () => {
+    const idle = room(1000, 90, 0);
+
+    // 编制想要 4 个，但站位只有 3 个，多出来的站在外围干瞪眼
+    assert.equal(quotaOf(idle, "upgrader"), 3);
+    assert.equal(quotaOf(idle, "builder"), 0);
   });
 
   it("矿边堆着货就不算被吃光，哪怕粮仓是空的", () => {
     // 粮仓空可能只是升级工换班的间隙，矿边还堆着两千说明运力才是瓶颈
-    const backlogged = room(0, 2000);
+    const backlogged = room(0, 2000, 0);
 
-    assert.equal(quotaOf(backlogged, "upgrader"), 2);
-    assert.equal(quotaOf(backlogged, "builder"), 2);
+    assert.equal(quotaOf(backlogged, "upgrader"), 3);
+    assert.equal(quotaOf(backlogged, "builder"), 0);
   });
 });

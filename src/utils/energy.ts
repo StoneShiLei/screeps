@@ -48,11 +48,16 @@ export function refreshEnergyState(creep: Creep, workAction: string): void {
  * 它只在搬运工断档时才存在，自己挖自己送正是它被造出来的理由。
  */
 export function gatherEnergy(creep: Creep, yieldToHauler = false): void {
-  const yielding = yieldToHauler && (feedingSpawn(creep.room) || hasHaulers(creep.room));
+  const feeding = yieldToHauler && feedingSpawn(creep.room);
+  const yielding = yieldToHauler && (feeding || hasHaulers(creep.room));
   const { supplies } = logisticsOf(creep.room, creep);
   const available = yielding ? supplies.filter(entry => entry.priority !== SUPPLY_PRIORITY.source) : supplies;
 
-  const supply = claimSupply(creep, available);
+  let supply = claimSupply(creep, available);
+
+  // 让位不能让到饿死：缓冲桶空了、spawn 那边又不缺货的时候，矿边容器让工人自取。
+  // 让位本是为了别把搬运工的收件箱认领光，可搬运工此刻并不缺这一桶，工人站着才是纯亏。
+  if (!supply && yielding && !feeding) supply = claimSupply(creep, supplies);
 
   if (supply) {
     const result = isDropped(supply) ? creep.pickup(supply) : creep.withdraw(supply, RESOURCE_ENERGY);

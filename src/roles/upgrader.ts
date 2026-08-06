@@ -11,8 +11,10 @@
 import { gatherEnergy, refreshEnergyState } from "utils/energy";
 import { announce } from "../utils/logger";
 import { containerAt } from "../utils/structures";
+import { hasCoreBuildPending } from "../planner/roomPlanner";
 import { hasHaulers } from "../managers/logistics";
 import { holdPosition } from "../movement/traffic";
+import { needsDowngradeShield } from "../utils/controller";
 import { travelTo } from "../movement/move";
 
 /**
@@ -29,6 +31,15 @@ const IDLE_TOLERANCE = 20;
 export function runUpgrader(creep: Creep): void {
   const controller = creep.room.controller;
   if (!controller) return;
+
+  // 本级核心建筑还没铺完：升级工停手把能量留给建造，除非快掉级了才顶一下。
+  // 配额那边已经不再补人，这里管的是还活着的那几个别继续烧能量。
+  if (shouldYieldToBuild(creep.room)) {
+    releaseStation(creep);
+    holdPosition(creep);
+    announce(creep, "等建");
+    return;
+  }
 
   const spot = creep.room.memory.upgradeSpot;
   const container = spot ? containerAt(creep.room, spot.x, spot.y) : undefined;
@@ -49,6 +60,16 @@ export function runUpgrader(creep: Creep): void {
     // 房间当场就孵不出人
     gatherEnergy(creep, true);
   }
+}
+
+/** 建造优先：有核心建筑任务、又还没到掉级警戒线 */
+function shouldYieldToBuild(room: Room): boolean {
+  if (needsDowngradeShield(room)) return false;
+  if (room.controller?.level === 8) return false;
+
+  return (
+    room.find(FIND_MY_CONSTRUCTION_SITES).length > 0 || hasCoreBuildPending(room)
+  );
 }
 
 /**

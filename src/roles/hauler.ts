@@ -9,6 +9,7 @@
 import {
   LogisticsEntry,
   SUPPLY_PRIORITY,
+  bufferDemandPriority,
   claimDemand,
   claimSupply,
   isDropped,
@@ -137,7 +138,15 @@ function nearbyWorker(creep: Creep): Creep | null {
  */
 function availableSupplies(creep: Creep): LogisticsEntry[] {
   const { supplies, demands } = logisticsOf(creep.room, creep);
-  if (demands.length > 0) return supplies;
 
-  return supplies.filter(entry => entry.priority <= SUPPLY_PRIORITY.source);
+  // 缓冲桶是工人的粮仓，只有出现比它更急的去处（spawn / tower）才值得掏。
+  // 否则搬运工会把桶里的货取出来又送回桶里，白转一圈还把工人的饭端走。
+  const sites = creep.room.find(FIND_MY_CONSTRUCTION_SITES).length;
+  const bufferPriority = bufferDemandPriority(sites);
+  const urgent = demands.some(entry => entry.priority < bufferPriority);
+  const usable = urgent ? supplies : supplies.filter(entry => entry.priority !== SUPPLY_PRIORITY.buffer);
+
+  if (demands.length > 0) return usable;
+
+  return usable.filter(entry => entry.priority <= SUPPLY_PRIORITY.source);
 }

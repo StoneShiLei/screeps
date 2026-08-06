@@ -11,8 +11,9 @@
  * 以为目标没了，又去挑一个新的，表现为搬运工在房间里来回换目标晃悠。
  */
 
-import { isPlanned } from "../planner/roomPlanner";
+import { hasCoreBuildPending, isPlanned } from "../planner/roomPlanner";
 import { isVisualOn } from "../utils/settings";
+import { needsDowngradeShield } from "../utils/controller";
 
 /** 需求方优先级，数字越小越先送 */
 export const DEMAND_PRIORITY = {
@@ -57,17 +58,17 @@ export const SUPPLY_PRIORITY = {
 const TOWER_REFILL_THRESHOLD = 0.8;
 
 /**
- * 控制器粮仓 / 缓冲桶的滞回区间。
+ * 控制器粮仓 / 缓冲桶补到这个量为止。
  *
- * 低于 LOW 才进需求表，送货途中一直补到 HIGH。单阈值会抖：送一趟刚过线 →
- * 表里消失 → 升级工几 tick 又吃穿 → 搬运工再跑一趟。
+ * 曾经这里是一对滞回阈值：低于 LOW(500) 才进需求表、高于 LOW 才算供给。结果是
+ * 桶稳定卡在 500 上下——搬运工一趟送满就撒手认领，下一趟回来桶已经 542，不再
+ * 进需求表；工人那边可取的只有 42 点，低于起送量，于是桶里明明写着五百多，
+ * builder 却报"无货源"站着不动。两条线画在同一个数上，中间那段谁都碰不了。
  *
- * 缓冲桶作供给时挂 LOW 以上可取、只留 LOW 那点垫底：它就是基地的现成能量缓存，
- * builder/upgrader 本该从里面舀能量花，之前卡在 HIGH 会把 500~1500 那一整段锁死，
- * 桶里明明有货工人却站着不动。留 LOW 是个小余量，跌破了需求表再把它补回 HIGH。
- * 搬运工不会拿它空转——没需求时 availableSupplies 只捡会蒸发/会溢出的那几档。
+ * 现在只留一条线：低于它就一直挂在需求表里（优先级压在 spawn / tower 之下，
+ * 抢不到急件的运力才会去填），桶里的货工人随便取。搬运工不会拿它空转——见
+ * hauler 的 availableSupplies，除非有比缓冲桶更急的需求，否则不从桶里往外掏。
  */
-const CONTAINER_REFILL_LOW = 500;
 const CONTAINER_REFILL_HIGH = 1500;
 
 /** 低于这个量的供给不值得专门跑一趟 */
@@ -118,10 +119,18 @@ export function hasHaulers(room: Room): boolean {
 /**
  * 缓冲容器这一档该排多靠前。
  *
- * 有工地时提到和控制器粮仓同级；没工地时退回最后一档。
+ * 有建造任务时提到原控制器粮仓那一档：建造工人就近取货，比跑矿边快；
+ * 控制器粮仓在建造期会被关掉（见 collectDemands），所以不会和升级抢。
+ * 没建造任务时退回最后一档。
  */
 export function bufferDemandPriority(sites: number): number {
   return sites > 0 ? DEMAND_PRIORITY.controller : DEMAND_PRIORITY.buffer;
+}
+
+/** 建造优先期间要不要给控制器粮仓补货：只在快掉级时才补 */
+function shouldFeedGranary(room: Room, sites: number): boolean {
+  if (sites === 0 && !hasCoreBuildPending(room)) return true;
+  return needsDowngradeShield(room);
 }
 
 /** 这个目标现在还有多少能量能拿 */
@@ -380,7 +389,10 @@ function collectDemands(room: Room): LogisticsEntry[] {
 
     const { x, y } = structure.pos;
     if (upgradeSpot && x === upgradeSpot.x && y === upgradeSpot.y) {
-      pushContainerDemand(demands, structure, DEMAND_PRIORITY.controller);
+      // 建造优先：别把能量灌进升级工的嘴，除非快掉级了
+      if (shouldFeedGranary(room, sites)) {
+        pushContainerDemand(demands, structure, DEMAND_PRIORITY.controller);
+      }
       continue;
     }
 
@@ -424,16 +436,8 @@ function collectSupplies(room: Room): LogisticsEntry[] {
       if (isMiningSpot(structure.pos.x, structure.pos.y)) {
         pushIfStocked(supplies, structure, SUPPLY_PRIORITY.source);
       } else {
-        const drawable = structure.store[RESOURCE_ENERGY] - CONTAINER_REFILL_LOW;
-        if (drawable >= MIN_PICKUP_AMOUNT) {
-          supplies.push({
-            id: structure.id,
-            x: structure.pos.x,
-            y: structure.pos.y,
-            amount: drawable,
-            priority: SUPPLY_PRIORITY.buffer
-          });
-        }
+        // 桶里的货全都能拿：它就是给工人现取现用的，留底反而把工人饿住
+        pushIfStocked(supplies, structure, SUPPLY_PRIORITY.buffer);
       }
     } else if (structure.structureType === STRUCTURE_STORAGE || structure.structureType === STRUCTURE_TERMINAL) {
       if (!room.controller?.my) continue;
@@ -463,11 +467,9 @@ function pushIfHungry(
   entries.push({ id: structure.id, x: structure.pos.x, y: structure.pos.y, amount: missing, priority });
 }
 
-/** 低于 LOW 才挂表，缺口按补到 HIGH 算 */
+/** 没装满 HIGH 就一直挂着，缺口按补到 HIGH 算 */
 function pushContainerDemand(entries: LogisticsEntry[], structure: StructureContainer, priority: number): void {
   const energy = structure.store[RESOURCE_ENERGY];
-  if (energy >= CONTAINER_REFILL_LOW) return;
-
   const missing = Math.min(CONTAINER_REFILL_HIGH - energy, structure.store.getFreeCapacity(RESOURCE_ENERGY) ?? 0);
   if (missing <= 0) return;
 
@@ -510,35 +512,30 @@ function demandPriorityOf(structure: AnyStoreStructure, room: Room): number | un
   if (structure.structureType === STRUCTURE_STORAGE) return DEMAND_PRIORITY.storage;
 
   if (structure.structureType === STRUCTURE_CONTAINER) {
+    const sites = room.find(FIND_MY_CONSTRUCTION_SITES).length;
     const spot = room.memory.upgradeSpot;
     if (spot && structure.pos.x === spot.x && structure.pos.y === spot.y) {
-      return DEMAND_PRIORITY.controller;
+      // 和 collectDemands 同一道闸：建造期不认控制器粮仓，免得粘着旧认领继续灌
+      return shouldFeedGranary(room, sites) ? DEMAND_PRIORITY.controller : undefined;
     }
 
     const mining = Object.values(room.memory.miningSpots ?? {});
     if (mining.some(s => s.x === structure.pos.x && s.y === structure.pos.y)) return undefined;
     if (!isPlanned(room, STRUCTURE_CONTAINER, structure.pos.x, structure.pos.y)) return undefined;
 
-    return bufferDemandPriority(room.find(FIND_MY_CONSTRUCTION_SITES).length);
+    return bufferDemandPriority(sites);
   }
 
   return undefined;
 }
 
-/** 已经认领的取货目标还有没有货（缓冲桶要看盈余） */
+/** 已经认领的取货目标还有没有货（控制器粮仓是升级工的私产，谁都别去掏） */
 function supplyStillOpen(target: LogisticsTarget, room: Room): boolean {
   if (isDropped(target)) return target.amount >= MIN_PICKUP_AMOUNT;
 
   if (isStoreContainer(target)) {
     const spot = room.memory.upgradeSpot;
     if (spot && target.pos.x === spot.x && target.pos.y === spot.y) return false;
-
-    const mining = Object.values(room.memory.miningSpots ?? {});
-    if (mining.some(s => s.x === target.pos.x && s.y === target.pos.y)) {
-      return target.store[RESOURCE_ENERGY] >= MIN_PICKUP_AMOUNT;
-    }
-
-    return target.store[RESOURCE_ENERGY] - CONTAINER_REFILL_LOW >= MIN_PICKUP_AMOUNT;
   }
 
   return target.store[RESOURCE_ENERGY] >= MIN_PICKUP_AMOUNT;
