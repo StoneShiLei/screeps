@@ -1,9 +1,8 @@
 /**
  * looter：去无主房间把前人留下的存货搬回家。
  *
- * 除了取货地点是敌方建筑，它和普通搬运工没有区别——所以体型也一样，是纯
- * CARRY 加 MOVE。活干完之后不自杀，直接转成 hauler：身体完全通用，而孵化费
- * 已经付过了。
+ * 体型是无路 1:1 的纯 CARRY+MOVE。活干完不自杀，转成 hauler：多出来的 MOVE
+ * 在本房路上只是略超配，孵化费已经付过了。
  */
 
 import { announce, log } from "../utils/logger";
@@ -147,8 +146,7 @@ function deliver(creep: Creep): void {
 /**
  * 活干完了，转成搬运工。
  *
- * 纯 CARRY MOVE 的身体正是 hauler 要的，孵化费也已经付了，自杀等于白扔
- * 剩下那几百 tick 的运力。
+ * 无路 1:1 身体转本房 hauler 会略超配 MOVE，仍满速；自杀等于白扔剩余寿命。
  */
 function finish(creep: Creep): void {
   if (creep.memory.targetRoom) return;

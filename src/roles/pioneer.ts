@@ -69,8 +69,8 @@ function work(creep: Creep): void {
     return;
   }
 
-  // 工地清空后转去补磨损。外矿没有塔，容器和路都会慢慢塌，而修它们正是
-  // 派拓荒者过来的理由。容器优先：矿工站在上面，塌了能量就重新洒一地
+  // 工地清空后转去补磨损。新分房还没有塔，容器和路只能靠人修；容器优先，
+  // 矿工站在上面，塌了能量就重新洒一地
   const worn = wornContainer(creep.room) ?? wornRoad(creep.room);
   if (worn) {
     announce(creep, worn.structureType === STRUCTURE_CONTAINER ? "补桶" : "补路");
@@ -81,10 +81,12 @@ function work(creep: Creep): void {
   }
 
   const controller = creep.room.controller;
-  // 不是自己的控制器就升不了级（外矿基建的情况）。手上的能量留着修，
-  // 站在原地等比跑回家更省
+  // 不是自己的房间就没升级可做。曾经外矿路队会停在这里"待命"等下一趟磨损，
+  // 现在外矿基建不归拓荒者了——目标房间没活干就清掉，回去当 builder 把
+  // 剩下的寿命花掉，别站在人家房里空转
   if (!controller?.my) {
-    announce(creep, "待命");
+    delete creep.memory.targetRoom;
+    fallBackHome(creep);
     return;
   }
 

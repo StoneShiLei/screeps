@@ -32,10 +32,15 @@ export function runUpgrader(creep: Creep): void {
   const controller = creep.room.controller;
   if (!controller) return;
 
-  // 本级核心建筑还没铺完：升级工停手把能量留给建造，除非快掉级了才顶一下。
-  // 配额那边已经不再补人，这里管的是还活着的那几个别继续烧能量。
+  // 本级核心建筑还没铺完：别再从粮仓/矿边抢能量，留给建造；除非快掉级了才放开。
+  // 配额已不补人。身上已经背着的能量仍灌进控制器——干站着烧寿命才是真浪费。
   if (shouldYieldToBuild(creep.room)) {
     releaseStation(creep);
+    if (creep.store[RESOURCE_ENERGY] > 0) {
+      moveAndUpgrade(creep, controller);
+      announce(creep, "等建");
+      return;
+    }
     holdPosition(creep);
     announce(creep, "等建");
     return;

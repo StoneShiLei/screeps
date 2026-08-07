@@ -58,20 +58,11 @@ export const SUPPLY_PRIORITY = {
 const TOWER_REFILL_THRESHOLD = 0.8;
 
 /**
- * 控制器粮仓 / 缓冲桶补到这个量为止。
+ * 低于这个量的供给不值得专门跑一趟。
  *
- * 曾经这里是一对滞回阈值：低于 LOW(500) 才进需求表、高于 LOW 才算供给。结果是
- * 桶稳定卡在 500 上下——搬运工一趟送满就撒手认领，下一趟回来桶已经 542，不再
- * 进需求表；工人那边可取的只有 42 点，低于起送量，于是桶里明明写着五百多，
- * builder 却报"无货源"站着不动。两条线画在同一个数上，中间那段谁都碰不了。
- *
- * 现在只留一条线：低于它就一直挂在需求表里（优先级压在 spawn / tower 之下，
- * 抢不到急件的运力才会去填），桶里的货工人随便取。搬运工不会拿它空转——见
- * hauler 的 availableSupplies，除非有比缓冲桶更急的需求，否则不从桶里往外掏。
+ * 遗迹除外：前人废墟会一直占着格子，里面的零头也该掏干净；墓碑很快蒸发，
+ * 为几十点能量跑一趟才划不来。
  */
-const CONTAINER_REFILL_HIGH = 1500;
-
-/** 低于这个量的供给不值得专门跑一趟 */
 const MIN_PICKUP_AMOUNT = 50;
 
 /** 供需表里的条目背后可能是建筑，也可能是墓碑、废墟或者地上的一堆能量 */
@@ -269,6 +260,10 @@ export function chooseEntry(fromX: number, fromY: number, entries: LogisticsEntr
 
 /**
  * 把供需状态画在房间里。
+ *
+ * 认领线不只画家里的 hauler：remoteHauler、looter、pioneer，以及走
+ * claimSupply 取货的工人（builder / upgrader 等）只要本房有 deliverTo /
+ * withdrawFrom，都画上——否则外矿运输队在矿边取货时像没进物流表。
  */
 export function visualizeLogistics(room: Room): void {
   if (!isVisualOn("logistics")) return;
@@ -284,12 +279,14 @@ export function visualizeLogistics(room: Room): void {
   }
 
   for (const creep of Object.values(Game.creeps)) {
-    if (creep.memory.role !== "hauler" || creep.memory.room !== room.name) continue;
+    // 按人在哪画，不按归属房：外矿搬运工取货时人在邻房
+    if (creep.room.name !== room.name) continue;
 
     const delivering = Boolean(creep.memory.deliverTo);
     const targetId = creep.memory.deliverTo ?? creep.memory.withdrawFrom;
     const target = targetId ? Game.getObjectById(targetId as Id<LogisticsTarget>) : null;
-    if (!target) continue;
+    // RoomVisual 只能画本房坐标；隔房认领等进了目标房再画
+    if (!target || target.pos.roomName !== room.name) continue;
 
     visual.line(creep.pos, target.pos, {
       color: delivering ? "#ffffff" : "#ffaa00",
@@ -426,12 +423,22 @@ function collectSupplies(room: Room): LogisticsEntry[] {
     pushIfStocked(supplies, tombstone, SUPPLY_PRIORITY.decaying);
   }
   for (const ruin of room.find(FIND_RUINS)) {
-    pushIfStocked(supplies, ruin, SUPPLY_PRIORITY.decaying);
+    // 遗迹有一点就挂：不留零头占格子
+    pushIfStocked(supplies, ruin, SUPPLY_PRIORITY.decaying, 1);
   }
+
+  const sites = room.find(FIND_MY_CONSTRUCTION_SITES).length;
+  // 建造期不往粮仓灌（shouldFeedGranary=false），升级工也停手——那桶里剩的货
+  // 再不开放供给就会一直锁着（e28s36 的 518 就是这么卡死的）。开放成缓冲档，
+  // 给 builder / 搬运工抽空去造；恢复喂粮仓之后仍是升级工私产，谁都别掏。
+  const drainGranary = Boolean(upgradeSpot) && !shouldFeedGranary(room, sites);
 
   for (const structure of room.find(FIND_STRUCTURES)) {
     if (structure.structureType === STRUCTURE_CONTAINER) {
-      if (upgradeSpot && structure.pos.x === upgradeSpot.x && structure.pos.y === upgradeSpot.y) continue;
+      if (upgradeSpot && structure.pos.x === upgradeSpot.x && structure.pos.y === upgradeSpot.y) {
+        if (drainGranary) pushIfStocked(supplies, structure, SUPPLY_PRIORITY.buffer);
+        continue;
+      }
 
       if (isMiningSpot(structure.pos.x, structure.pos.y)) {
         pushIfStocked(supplies, structure, SUPPLY_PRIORITY.source);
@@ -467,18 +474,19 @@ function pushIfHungry(
   entries.push({ id: structure.id, x: structure.pos.x, y: structure.pos.y, amount: missing, priority });
 }
 
-/** 没装满 HIGH 就一直挂着，缺口按补到 HIGH 算 */
+/** 容器有空位就挂需求，缺口按补满算（和 storage 同一口径） */
 function pushContainerDemand(entries: LogisticsEntry[], structure: StructureContainer, priority: number): void {
-  const energy = structure.store[RESOURCE_ENERGY];
-  const missing = Math.min(CONTAINER_REFILL_HIGH - energy, structure.store.getFreeCapacity(RESOURCE_ENERGY) ?? 0);
-  if (missing <= 0) return;
-
-  entries.push({ id: structure.id, x: structure.pos.x, y: structure.pos.y, amount: missing, priority });
+  pushIfHungry(entries, structure, priority);
 }
 
-function pushIfStocked(entries: LogisticsEntry[], holder: AnyStoreStructure | Tombstone | Ruin, priority: number): void {
+function pushIfStocked(
+  entries: LogisticsEntry[],
+  holder: AnyStoreStructure | Tombstone | Ruin,
+  priority: number,
+  minAmount: number = MIN_PICKUP_AMOUNT
+): void {
   const available = holder.store[RESOURCE_ENERGY];
-  if (available < MIN_PICKUP_AMOUNT) return;
+  if (available < minAmount) return;
 
   entries.push({ id: holder.id, x: holder.pos.x, y: holder.pos.y, amount: available, priority });
 }
@@ -486,14 +494,9 @@ function pushIfStocked(entries: LogisticsEntry[], holder: AnyStoreStructure | To
 /**
  * 已经认领的送货目标还收不收得下。
  *
- * 容器按 HIGH 判断：低于 LOW 才进表，但上路之后要允许一直补到 HIGH，
- * 否则送到 500 就撒手，滞回形同虚设。
+ * 容器和 storage 一样：有空位就继续送，送到一半不撒手。
  */
 function demandStillOpen(structure: AnyStoreStructure): boolean {
-  if (structure.structureType === STRUCTURE_CONTAINER) {
-    return structure.store[RESOURCE_ENERGY] < CONTAINER_REFILL_HIGH;
-  }
-
   if (structure.structureType === STRUCTURE_TOWER) {
     const cap = structure.store.getCapacity(RESOURCE_ENERGY);
     if (!cap) return false;
@@ -529,16 +532,27 @@ function demandPriorityOf(structure: AnyStoreStructure, room: Room): number | un
   return undefined;
 }
 
-/** 已经认领的取货目标还有没有货（控制器粮仓是升级工的私产，谁都别去掏） */
+/** 已经认领的取货目标还有没有货 */
 function supplyStillOpen(target: LogisticsTarget, room: Room): boolean {
   if (isDropped(target)) return target.amount >= MIN_PICKUP_AMOUNT;
 
   if (isStoreContainer(target)) {
     const spot = room.memory.upgradeSpot;
-    if (spot && target.pos.x === spot.x && target.pos.y === spot.y) return false;
+    if (spot && target.pos.x === spot.x && target.pos.y === spot.y) {
+      // 喂粮仓期间是升级工私产；建造期抽空时才允许继续认领
+      const sites = room.find(FIND_MY_CONSTRUCTION_SITES).length;
+      if (shouldFeedGranary(room, sites)) return false;
+    }
   }
 
-  return target.store[RESOURCE_ENERGY] >= MIN_PICKUP_AMOUNT;
+  // 遗迹认领后也掏到空；墓碑和其它供给仍卡 50 的起送线
+  const min = isRuin(target) ? 1 : MIN_PICKUP_AMOUNT;
+  return target.store[RESOURCE_ENERGY] >= min;
+}
+
+/** Ruin 有 destroyTime；墓碑是 deathTime，两者都有 store */
+function isRuin(target: LogisticsTarget): target is Ruin {
+  return "destroyTime" in target;
 }
 
 function isStoreContainer(target: LogisticsTarget): target is StructureContainer {

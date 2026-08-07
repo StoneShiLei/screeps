@@ -37,14 +37,6 @@ const BUNKER_RADIUS = BUNKER_STRUCTURES.reduce(
 
 const ROOM_EDGE = 49;
 
-/**
- * 能量源旁的容器排在所有东西前面，连 extension 都要让路。
- *
- * 它一建好，矿工就能上岗：三个 WORK 钉在矿边每 tick 稳挖 6 点，而三个来回
- * 跑的 harvester 加起来也就 3 点上下。先把这条产线接通，后面所有建设都快一倍。
- */
-const MINING_CONTAINER_PRIORITY = -1;
-
 /** bunker 内部的缓冲容器，早期没有 storage 和 link 配合，建了也是空放着 */
 const BUNKER_CONTAINER_PRIORITY = 99;
 
@@ -112,6 +104,14 @@ const BUILD_PRIORITY: BuildableStructureConstant[] = [
   "observer",
   "road"
 ];
+
+/**
+ * 能量源旁的容器：排在本级 extension 之后、storage 之前。
+ *
+ * 以前压过 extension（-1），早期工地名额（5）会被矿边桶占满，extension 开不动。
+ * 矿工没桶也能掉地上，hauler 照样捡；extension 抬能量上限更急。
+ */
+const MINING_CONTAINER_PRIORITY = BUILD_PRIORITY.indexOf("extension") + 0.5;
 
 /**
  * 沼泽段的路排在其余路面前面。

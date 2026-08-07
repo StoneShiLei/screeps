@@ -12,7 +12,21 @@
 import { activeRemoteSources, commuteOrFlee } from "../managers/remote";
 import { claimDemand, claimSupply, isDropped, logisticsOf } from "../managers/logistics";
 import { announce } from "../utils/logger";
-import { travelTo } from "../movement/move";
+import { holdPosition } from "../movement/traffic";
+import { commuteTo, travelTo } from "../movement/move";
+
+/**
+ * spawn / extension 满了、又没有 storage 时，把能量喂给这些会花能量的角色。
+ *
+ * remoteHauler 顶多带一个用来修路的 WORK，自己消化不掉一车能量，只能 transfer。
+ */
+const FEED_ROLES: CreepRole[] = ["builder", "upgrader", "pioneer"];
+
+/** build / repair 的射程，对应游戏常量 BUILD_RANGE(3) */
+const BUILD_RANGE = 3;
+
+/** 路掉血到这个比例以下才值得修，和 planner/remoteRoads 同口径 */
+const ROAD_REPAIR_THRESHOLD = 0.6;
 
 export function runRemoteHauler(creep: Creep): void {
   updateState(creep);
@@ -22,6 +36,38 @@ export function runRemoteHauler(creep: Creep): void {
   } else {
     collect(creep);
   }
+
+  // 放在最后：move 和 build/repair 是两种意图，同一 tick 都做得了，所以顺路
+  // 修路一格速度都不掉。RCL4 起体型里那一个 WORK 就是为这件事配的
+  tendRoad(creep);
+}
+
+/**
+ * 顺路把脚下这条线的路建起来、修回去。
+ *
+ * 只做够得着的那一格，绝不为它改道：运输队的本职是运，绕一格去补三点进度
+ * 是把主业赔进去。反过来，正好路过时那几点进度和几十点血是白捡的——
+ * 这条线上一直有人往返，积少成多足够抵消 100 血/1000tick 的衰减。
+ */
+function tendRoad(creep: Creep): void {
+  if (creep.store[RESOURCE_ENERGY] === 0) return;
+  if (!creep.body?.some(part => part.type === WORK)) return;
+
+  const site = creep.pos
+    .findInRange(FIND_MY_CONSTRUCTION_SITES, BUILD_RANGE)
+    .find(candidate => candidate.structureType === STRUCTURE_ROAD);
+  if (site) {
+    creep.build(site);
+    return;
+  }
+
+  const worn = creep.pos
+    .findInRange(FIND_STRUCTURES, BUILD_RANGE)
+    .find(
+      (structure): structure is StructureRoad =>
+        structure.structureType === STRUCTURE_ROAD && structure.hits < structure.hitsMax * ROAD_REPAIR_THRESHOLD
+    );
+  if (worn) creep.repair(worn);
 }
 
 /**
@@ -46,6 +92,8 @@ function collect(creep: Creep): void {
   const roomName = resolveRemoteRoom(creep);
   if (!roomName) {
     announce(creep, "无外矿");
+    if (creep.room.name !== creep.memory.room) commuteTo(creep, creep.memory.room);
+    else holdPosition(creep);
     return;
   }
 
@@ -86,11 +134,17 @@ function deliver(creep: Creep): void {
     return;
   }
 
-  const target = claimDemand(creep, logisticsOf(home, creep).demands);
+  // 建筑缺口优先；满了就喂本房会烧能量的工人（建造/升级），别满载干站
+  const structure = claimDemand(creep, logisticsOf(home, creep).demands);
+  const worker = structure ? null : hungryWorker(creep);
+  const target = structure ?? worker;
   if (!target) {
     announce(creep, "无处卸");
+    holdPosition(creep);
     return;
   }
+
+  if (worker) announce(creep, "投喂");
 
   const result = creep.transfer(target, RESOURCE_ENERGY);
   if (result === ERR_NOT_IN_RANGE) {
@@ -98,6 +152,19 @@ function deliver(creep: Creep): void {
   } else {
     delete creep.memory.deliverTo;
   }
+}
+
+/**
+ * 找一个还装得下能量的建造/升级/拓荒工。
+ *
+ * 不限距离：远程运输队已经跑完长途，家门口没洞可卸时追工人比干站划算。
+ * 本房 hauler 仍用短距投喂，免得被拽离 spawn。
+ */
+function hungryWorker(creep: Creep): Creep | null {
+  return creep.pos.findClosestByRange(FIND_MY_CREEPS, {
+    filter: other =>
+      FEED_ROLES.includes(other.memory.role) && other.store.getFreeCapacity(RESOURCE_ENERGY) > 0
+  });
 }
 
 /**
@@ -110,11 +177,13 @@ function resolveRemoteRoom(creep: Creep): string | undefined {
   const home = Game.rooms[creep.memory.room];
   if (!home) return undefined;
 
+  // 不挑有没有矿边桶：没桶时矿工的产出掉在地上按 ceil(数量/1000) 每 tick 蒸发，
+  // 那正是最该有人去拉的时候。物流表里掉落的优先级本来就高于容器
   const rooms = [...new Set(activeRemoteSources(home).map(entry => entry.roomName))];
-  if (rooms.length === 0) return undefined;
-
-  const current = creep.memory.targetRoom;
-  if (current && rooms.includes(current)) return current;
+  if (rooms.length === 0) {
+    delete creep.memory.targetRoom;
+    return undefined;
+  }
 
   const crowd: Record<string, number> = {};
   for (const roomName of rooms) crowd[roomName] = 0;
@@ -124,6 +193,16 @@ function resolveRemoteRoom(creep: Creep): string | undefined {
 
     const assigned = other.memory.targetRoom;
     if (assigned && assigned in crowd) crowd[assigned]++;
+  }
+
+  const current = creep.memory.targetRoom;
+  // 认死一个房间是对的——中途改主意等于空跑几十格。但只在"差一个人头"以内
+  // 才粘住：差到两人以上说明编制严重偏科（常见于新开的外矿），空车时放它改派
+  if (current && rooms.includes(current) && !creep.memory.working) {
+    const lightest = rooms.reduce((best, roomName) => (crowd[roomName] < crowd[best] ? roomName : best));
+    if (crowd[current] - crowd[lightest] < 2) return current;
+  } else if (current && rooms.includes(current)) {
+    return current;
   }
 
   const chosen = rooms.reduce((best, roomName) => (crowd[roomName] < crowd[best] ? roomName : best), rooms[0]);

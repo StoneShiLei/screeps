@@ -7,9 +7,9 @@
  */
 
 import {
+  DEMAND_PRIORITY,
   LogisticsEntry,
   SUPPLY_PRIORITY,
-  bufferDemandPriority,
   claimDemand,
   claimSupply,
   isDropped,
@@ -51,6 +51,10 @@ export function runHauler(creep: Creep): void {
  *
  * 换状态时把上一段的任务清掉，否则物流系统会以为它还在赶去那个目标，
  * 白白替它占着份额，别的 hauler 就不去了。
+ *
+ * 上一趟卸完、身上还有货但没装满时：若房间里仍有可取的货，先补满再接下单。
+ * 否则半载跑去填下一个 extension，等于把空着的 CARRY 白运一趟。
+ * 正在认领的送货单不打断（deliverTo 还在就继续送）。
  */
 function updateState(creep: Creep): void {
   if (creep.memory.working && creep.store[RESOURCE_ENERGY] === 0) {
@@ -61,6 +65,15 @@ function updateState(creep: Creep): void {
     creep.memory.working = true;
     delete creep.memory.withdrawFrom;
     announce(creep, "送货");
+  } else if (
+    creep.memory.working &&
+    !creep.memory.deliverTo &&
+    creep.store[RESOURCE_ENERGY] > 0 &&
+    creep.store.getFreeCapacity(RESOURCE_ENERGY) > 0 &&
+    availableSupplies(creep).length > 0
+  ) {
+    creep.memory.working = false;
+    announce(creep, "补货");
   }
 }
 
@@ -138,13 +151,24 @@ function nearbyWorker(creep: Creep): Creep | null {
  */
 function availableSupplies(creep: Creep): LogisticsEntry[] {
   const { supplies, demands } = logisticsOf(creep.room, creep);
+  return filterHaulerSupplies(supplies, demands);
+}
 
-  // 缓冲桶是工人的粮仓，只有出现比它更急的去处（spawn / tower）才值得掏。
-  // 否则搬运工会把桶里的货取出来又送回桶里，白转一圈还把工人的饭端走。
-  const sites = creep.room.find(FIND_MY_CONSTRUCTION_SITES).length;
-  const bufferPriority = bufferDemandPriority(sites);
-  const urgent = demands.some(entry => entry.priority < bufferPriority);
-  const usable = urgent ? supplies : supplies.filter(entry => entry.priority !== SUPPLY_PRIORITY.buffer);
+/**
+ * 搬运工这一趟能碰哪些货源。
+ *
+ * - 缓冲桶：只有 spawn / extension / tower 急缺时才掏，别为了灌 storage 把工人近粮端走
+ * - storage：只有 spawn / tower / 粮仓急缺时才动库存；只剩囤仓时禁止取，防仓内自转
+ * - 完全没需求：只捡掉落和矿边，别掏家底
+ */
+export function filterHaulerSupplies(supplies: LogisticsEntry[], demands: LogisticsEntry[]): LogisticsEntry[] {
+  const spawnOrTower = demands.some(entry => entry.priority <= DEMAND_PRIORITY.tower);
+  let usable = spawnOrTower ? supplies : supplies.filter(entry => entry.priority !== SUPPLY_PRIORITY.buffer);
+
+  const needsStock = demands.some(entry => entry.priority < DEMAND_PRIORITY.storage);
+  if (!needsStock) {
+    usable = usable.filter(entry => entry.priority !== SUPPLY_PRIORITY.storage);
+  }
 
   if (demands.length > 0) return usable;
 

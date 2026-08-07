@@ -2,8 +2,10 @@ import { cleanupCreepMemory, cleanupRoomMemory } from "utils/memory";
 import { evade, reportThreat, runDefender, runGuardian } from "roles/defender";
 import { runLootManager, trackLoot } from "managers/loot";
 import { runRemoteManager, watchRemote } from "managers/remote";
+import { runSafeMode } from "managers/safeMode";
 import { ErrorMapper } from "utils/ErrorMapper";
 import { announce } from "utils/logger";
+import { announceDeploy } from "utils/deploy";
 import { drawRoomPanel } from "managers/panel";
 import { installCommands } from "cli/commands";
 import { runBuilder } from "roles/builder";
@@ -17,12 +19,13 @@ import { runHauler } from "roles/hauler";
 import { runLooter } from "roles/looter";
 import { runMiner } from "roles/miner";
 import { runPioneer } from "roles/pioneer";
+import { sampleCpuUsage, tryGeneratePixel } from "managers/pixels";
 import { runRemoteHauler } from "roles/remoteHauler";
 import { runRemoteMiner } from "roles/remoteMiner";
 import { runReserver } from "roles/reserver";
 import { runRoomPlanner } from "planner/roomPlanner";
 import { runScout } from "roles/scout";
-import { runSpawnManager } from "managers/spawnManager";
+import { ensureGuardianDuty, runSpawnManager } from "managers/spawnManager";
 import { runTowers } from "managers/tower";
 import { runTraffic } from "movement/traffic";
 import { runUpgrader } from "roles/upgrader";
@@ -34,6 +37,12 @@ installCommands();
 // ErrorMapper 用 source map 把报错行号还原成 TypeScript 源码的位置，
 // 否则游戏控制台里显示的都是打包后 main.js 的行号。
 export const loop = ErrorMapper.wrapLoop(() => {
+  // 搓像素会取消同 tick 全部意图，只能在开头判定并整 tick 跳过
+  if (tryGeneratePixel()) return;
+
+  // 新包加载后控制台打一次变更提示
+  announceDeploy();
+
   cleanupCreepMemory();
   cleanupRoomMemory();
   // 插在地图上的旗子等于一条控制台命令，先把它们兑现成任务再进房间循环
@@ -49,6 +58,8 @@ export const loop = ErrorMapper.wrapLoop(() => {
     }
 
     reportThreat(room);
+    // 破防丢建筑时立刻拉闸，赶在本 tick 后续逻辑前面
+    runSafeMode(room);
     runTowers(room);
     // 占下来的房间也要接着数存量：分房目标往往正是那个有前人仓库的房间，
     // 归属一变就停止记录的话，搬运配额会卡在占领前的那个数字上
@@ -73,6 +84,7 @@ export const loop = ErrorMapper.wrapLoop(() => {
     }
 
     if (creep.memory.role === "guardian") {
+      ensureGuardianDuty(creep);
       runGuardian(creep);
       continue;
     }
@@ -136,4 +148,6 @@ export const loop = ErrorMapper.wrapLoop(() => {
     visualizeLogistics(room);
     drawRoomPanel(room);
   }
+
+  sampleCpuUsage();
 });

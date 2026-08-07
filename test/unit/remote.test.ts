@@ -2,18 +2,29 @@ import { assert } from "chai";
 import { bodyCost, bodyFor } from "../../src/utils/body";
 import { cleanupRoomMemory } from "../../src/utils/memory";
 import {
+  REMOTE_MIN_LEVEL,
   activeRemoteSources,
   breachBudgetFor,
   breachTargets,
   dismantlerQuota,
+  harvestersForRemoteSource,
   haulersForRemote,
   nextScoutTarget,
+  remoteCoreTarget,
+  remoteDefenseForce,
+  remoteDefenseTarget,
+  remoteEvictTarget,
+  remoteHaulersNeeded,
   reserveTargets,
   reserverQuota,
+  runRemoteManager,
+  surveyRoom,
   unassignedBreachTarget,
-  unassignedReserveTarget
+  unassignedReserveTarget,
+  watchRemote
 } from "../../src/managers/remote";
 import { runScout } from "../../src/roles/scout";
+import { installGameConstants } from "./mock";
 import { worldRange } from "../../src/utils/distance";
 
 function countPart(body: BodyPartConstant[], part: BodyPartConstant): number {
@@ -23,6 +34,42 @@ function countPart(body: BodyPartConstant[], part: BodyPartConstant): number {
 /** 中立房和已预定房的每 tick 产出，和 remote.ts 里的两个常量对应 */
 const NEUTRAL = 5;
 const RESERVED = 10;
+
+describe("外矿门槛", () => {
+  it("RCL1 就能开外矿（跨房 harvester 阶段）", () => {
+    assert.equal(REMOTE_MIN_LEVEL, 1);
+  });
+});
+
+describe("RCL1 跨房 harvester 定编", () => {
+  // 体型取满编 harvester：3 WORK / 150 运力，和 maxRepeat:3 对齐
+  const CAP = 150;
+  const WORK = 3;
+
+  it("路越远要的人越多，通勤把挖净窗口吃掉了", () => {
+    const near = harvestersForRemoteSource(10, CAP, WORK, NEUTRAL);
+    const far = harvestersForRemoteSource(80, CAP, WORK, NEUTRAL);
+
+    assert.isAbove(far, near);
+    assert.isAtLeast(near, 1);
+  });
+
+  it("运力越大派得越少", () => {
+    // 近程、别撞上每源上限，否则两边都封顶看不出差别
+    assert.isAbove(
+      harvestersForRemoteSource(20, 100, 2, NEUTRAL),
+      harvestersForRemoteSource(20, CAP, WORK, NEUTRAL)
+    );
+  });
+
+  it("再近也至少要一个", () => {
+    assert.equal(harvestersForRemoteSource(1, 2000, 5, NEUTRAL), 1);
+  });
+
+  it("每源有上限，避免早期孵化被外矿吃光", () => {
+    assert.isAtMost(harvestersForRemoteSource(90, 50, 1, NEUTRAL), 4);
+  });
+});
 
 describe("外矿运力测算", () => {
   it("路越远要的运输队越多，因为产出在路上等着", () => {
@@ -75,12 +122,68 @@ describe("外矿运力测算", () => {
   });
 });
 
+describe("外矿运输不再等桶", () => {
+  class FakePosition {
+    public constructor(public x: number, public y: number, public roomName: string) {}
+  }
+
+  let saved: { Game: unknown; Memory: unknown; RoomPosition: unknown };
+
+  beforeEach(() => {
+    installGameConstants();
+    const context = global as unknown as typeof saved;
+    saved = { Game: context.Game, Memory: context.Memory, RoomPosition: context.RoomPosition };
+    context.RoomPosition = FakePosition;
+    context.Game = { creeps: {}, time: 500000, rooms: {} };
+    context.Memory = {
+      rooms: {
+        W1N2: {
+          scouted: 1,
+          sources: { s1: { x: 10, y: 10 } },
+          miningSpots: { s1: { x: 11, y: 10 } },
+          home: "W1N1",
+          // 真实路程：让定编不吃切比雪夫直线的偏小值
+          pathLen: 40
+        }
+      }
+    };
+  });
+
+  afterEach(() => {
+    Object.assign(global, saved);
+  });
+
+  it("没有容器也算运输编制：掉落蒸发正是最该有人去拉的时候", () => {
+    const home = {
+      name: "W1N1",
+      controller: { level: 3 },
+      energyCapacityAvailable: 800,
+      // 核心建完，别触发早期帽
+      find: () => [],
+      memory: { remotes: ["W1N2"], anchor: { x: 25, y: 25 } },
+      getPositionAt: () => null
+    } as unknown as Room;
+    (global as unknown as { Game: { rooms: Record<string, Room>; time: number } }).Game.rooms.W1N1 = home;
+    (global as unknown as { Game: { time: number } }).Game.time = 500001;
+
+    assert.isAbove(remoteHaulersNeeded(home), 0);
+  });
+});
+
 describe("外矿体型", () => {
   it("矿工只带 3 个 WORK，够追上 1500 容量的再生速度就行", () => {
     const body = bodyFor("remoteMiner", 800);
 
     assert.equal(countPart(body, "work"), 3, "中立房的源平均 5 能量/tick，3 个 WORK 每 tick 挖 6 点已经有余");
     assert.equal(countPart(body, "move"), 3, "通勤几十格，MOVE 少了路上就把寿命耗光了");
+    assert.equal(countPart(body, "carry"), 1, "预算够时带 1 CARRY，自己建修脚下的容器");
+  });
+
+  it("RCL2 的 450 预算不加 CARRY：加了就只剩 2 个 WORK，挖不满源", () => {
+    const body = bodyFor("remoteMiner", 450);
+
+    assert.equal(countPart(body, "work"), 3);
+    assert.equal(countPart(body, "carry"), 0);
   });
 
   it("矿工再有钱也不加 WORK", () => {
@@ -92,6 +195,18 @@ describe("外矿体型", () => {
 
     assert.equal(countPart(body, "carry"), countPart(body, "move"));
     assert.equal(countPart(body, "carry"), 8);
+    assert.equal(countPart(body, "work"), 0, "RCL4 之前不装 WORK，那时还没外矿路可修");
+  });
+
+  it("RCL4 起运输队带 1 WORK 顺路修路，MOVE 仍盖住满载重部件", () => {
+    const body = bodyFor("remoteHauler", 1300, undefined, 4);
+
+    assert.equal(countPart(body, "work"), 1);
+    assert.isAtLeast(
+      countPart(body, "move"),
+      countPart(body, "work") + countPart(body, "carry"),
+      "外矿路还没铺完之前大半路程仍是平地，满载必须 1:1"
+    );
   });
 
   it("侦察兵就一个 MOVE，五十能量的消耗品", () => {
@@ -250,7 +365,7 @@ describe("预定员补员（双 CLAIM）", () => {
   });
 
   it("余量还很厚就不补人，两个 CLAIM 攒下的库存正是用来省孵化费的", () => {
-    // 通勤约 65 + 30 缓冲 = 95；4000 远高于这个门槛
+    // lead ≈ 通勤 65 + 孵化 12 + 排队 200 ≈ 277；4000 远高于这个门槛
     Memory.rooms.W1N2.reserveEnds = Game.time + 4000;
 
     assert.equal(reserverQuota(home), 0);
@@ -267,11 +382,20 @@ describe("预定员补员（双 CLAIM）", () => {
   });
 
   it("人死光了、余量掉到通勤门槛以下才补一个", () => {
-    // 通勤约 65 + 30 = 95，余量 50 撑不到人赶到
+    // lead ≈ 277，余量 50 撑不到人赶到
     Memory.rooms.W1N2.reserveEnds = Game.time + 50;
 
     assert.equal(reserverQuota(home), 1);
     assert.equal(unassignedReserveTarget(home), "W1N2");
+  });
+
+  it("余量告急且在岗的快死时提前接班，别等死了再孵化赶路", () => {
+    // 旧逻辑：人活着就 return 1，死了才开始孵——E27S36 预定剩 25 tick 才赶到
+    Memory.rooms.W1N2.reserveEnds = Game.time + 50;
+    onDuty(50);
+
+    assert.equal(reserverQuota(home), 2, "告急时退休接班，两头重叠保住预定");
+    assert.equal(unassignedReserveTarget(home), "W1N2", "退休的不占坑，接班的能认到房间");
   });
 
   it("正在抢别人预定时仍按退休接班：磨预定必须有人持续在场", () => {
@@ -452,13 +576,350 @@ describe("遇袭之后的复工", () => {
   });
 });
 
+describe("外矿矿位被占", () => {
+  const home = {
+    name: "W1N1",
+    controller: { level: 4 },
+    energyCapacityAvailable: 1300,
+    memory: { remotes: ["W1N2"], anchor: { x: 25, y: 25 } }
+  } as unknown as Room;
+
+  let saved: { Game: unknown; Memory: unknown };
+  let tick = 60_000;
+
+  beforeEach(() => {
+    installGameConstants();
+    const context = global as unknown as typeof saved;
+    saved = { Game: context.Game, Memory: context.Memory };
+
+    context.Game = { creeps: {}, rooms: {}, time: (tick += 10), map: { describeExits: () => ({}) } };
+    context.Memory = {
+      rooms: {
+        W1N2: {
+          sources: { s1: { x: 8, y: 42 } },
+          scouted: 1,
+          miningSpots: { s1: { x: 9, y: 43 } },
+          home: "W1N1"
+        }
+      }
+    };
+  });
+
+  afterEach(() => {
+    Object.assign(global, saved);
+  });
+
+  function remoteWith(creeps: { x: number; y: number; armed?: boolean }[]): void {
+    const hostiles = creeps.map((creep, i) => ({
+      name: `foe_${i}`,
+      my: false,
+      owner: { username: "Ynn0z" },
+      body: creep.armed
+        ? [{ type: "attack", hits: 100 }, { type: "move", hits: 100 }]
+        : [{ type: "work", hits: 100 }, { type: "move", hits: 100 }],
+      pos: { x: creep.x, y: creep.y }
+    }));
+
+    Game.rooms.W1N2 = {
+      name: "W1N2",
+      memory: { miningSpots: { s1: { x: 9, y: 43 } } },
+      find: (type: number) => {
+        if (type === FIND_HOSTILE_CREEPS) return hostiles;
+        if (type === FIND_MY_STRUCTURES) return [];
+        return [];
+      },
+      lookForAt: (_look: string, x: number, y: number) =>
+        hostiles.filter(creep => creep.pos.x === x && creep.pos.y === y)
+    } as unknown as Room;
+  }
+
+  it("邻居钉在矿边落点上就标清场目标，好派 guardian 去赶人", () => {
+    // E27S36：源旁只有一格能站，被占就 harvest 不到，换位不可能
+    remoteWith([{ x: 9, y: 43 }]);
+
+    assert.equal(remoteEvictTarget(home), "W1N2");
+  });
+
+  it("只是路过、没占落点就不派兵——对方运输队天天穿，见谁都打划不来", () => {
+    remoteWith([{ x: 20, y: 20 }]);
+
+    assert.isUndefined(remoteEvictTarget(home));
+  });
+
+  it("有武装敌人时不走驱赶这条：改由抗争配额派兵", () => {
+    remoteWith([{ x: 9, y: 43, armed: true }]);
+
+    assert.isUndefined(remoteEvictTarget(home));
+    assert.deepEqual(remoteDefenseTarget(home), { target: "W1N2", count: 1 });
+  });
+});
+
+describe("外矿遇袭：能打就抗、打不过再撤", () => {
+  const home = {
+    name: "W1N1",
+    controller: { level: 4 },
+    energyCapacityAvailable: 1300,
+    memory: { remotes: ["W1N2"] }
+  } as unknown as Room;
+
+  let saved: { Game: unknown; Memory: unknown };
+  // 避开 Game.time % 100 === 0，免得 watchRemote 顺带跑 survey
+  let tick = 70_003;
+
+  beforeEach(() => {
+    installGameConstants();
+    const context = global as unknown as typeof saved;
+    saved = { Game: context.Game, Memory: context.Memory };
+
+    context.Game = {
+      creeps: {},
+      rooms: { W1N1: home },
+      time: (tick += 10),
+      map: { describeExits: () => ({}) },
+      spawns: {}
+    };
+    context.Memory = {
+      rooms: {
+        W1N2: {
+          sources: { s1: { x: 8, y: 42 } },
+          miningSpots: { s1: { x: 9, y: 43 } },
+          scouted: 1,
+          home: "W1N1"
+        }
+      }
+    };
+  });
+
+  afterEach(() => {
+    Object.assign(global, saved);
+  });
+
+  function foe(parts: BodyPartConstant[]): Creep {
+    return {
+      body: parts.map(type => ({ type, hits: 100 })),
+      owner: { username: "Invader" }
+    } as unknown as Creep;
+  }
+
+  function remoteWithArmed(hostiles: Creep[]): Room {
+    const memory = Memory.rooms.W1N2;
+    const room = {
+      name: "W1N2",
+      memory,
+      find: (type: number) => {
+        if (type === FIND_HOSTILE_CREEPS) return hostiles;
+        return [];
+      },
+      // 有落点后 maintainRemoteSites 会查格子；测试里直接挡掉，只关心遇袭分支
+      getPositionAt: () => null
+    } as unknown as Room;
+    Game.rooms.W1N2 = room;
+    return room;
+  }
+
+  it("小体型武装打得过：所需人数封在上限内", () => {
+    assert.equal(remoteDefenseForce([foe(["attack", "move"])], 1300), 1);
+  });
+
+  it("成建制打不过：超过封顶就返回 undefined，该撤", () => {
+    // 两个 15 攻 → 需要 3；再加奶 → 4，超过 MAX_REMOTE_GUARDIANS
+    const heavy = [
+      foe([...new Array(15).fill("attack"), "heal"]),
+      foe(new Array(15).fill("attack"))
+    ];
+    assert.isUndefined(remoteDefenseForce(heavy, 1300));
+  });
+
+  it("打得过就不记 raided，标抗争目标好派 guardian", () => {
+    const room = remoteWithArmed([foe(["attack", "move"])]);
+
+    watchRemote(room);
+
+    assert.isUndefined(Memory.rooms.W1N2.raided, "能打就别停采");
+    assert.deepEqual(remoteDefenseTarget(home), { target: "W1N2", count: 1 });
+  });
+
+  it("旧冷却还在但现在打得过时，清掉 raided 改抗争", () => {
+    Memory.rooms.W1N2.raided = Game.time - 10;
+    const room = remoteWithArmed([foe(["attack", "move"])]);
+
+    watchRemote(room);
+
+    assert.isUndefined(Memory.rooms.W1N2.raided, "可打就别继续趴着");
+    assert.deepEqual(remoteDefenseTarget(home), { target: "W1N2", count: 1 });
+  });
+
+  it("打不过才记 raided 进冷却，也不再标抗争", () => {
+    const heavy = [
+      foe([...new Array(15).fill("attack"), "heal"]),
+      foe(new Array(15).fill("attack"))
+    ];
+    const room = remoteWithArmed(heavy);
+
+    watchRemote(room);
+
+    assert.equal(Memory.rooms.W1N2.raided, Game.time);
+    assert.isUndefined(remoteDefenseTarget(home), "冷却中的外矿不再派人硬刚");
+  });
+});
+
+describe("外矿 0 级 Invader Core", () => {
+  const home = {
+    name: "W1N1",
+    controller: { level: 4, my: true },
+    energyCapacityAvailable: 1300,
+    memory: { remotes: [] as string[], anchor: { x: 25, y: 25 } }
+  } as unknown as Room;
+
+  let saved: { Game: unknown; Memory: unknown; RoomPosition: unknown };
+
+  beforeEach(() => {
+    installGameConstants();
+    const context = global as unknown as typeof saved;
+    saved = { Game: context.Game, Memory: context.Memory, RoomPosition: context.RoomPosition };
+
+    context.RoomPosition = class {
+      constructor(
+        public x: number,
+        public y: number,
+        public roomName: string
+      ) {}
+    };
+    context.Game = {
+      creeps: {},
+      rooms: { W1N1: home },
+      time: 50_000,
+      map: {
+        describeExits: () => ({ "1": "W1N2" }),
+        getRoomLinearDistance: () => 1
+      },
+      spawns: {},
+      cpu: { getUsed: () => 0 }
+    };
+    context.Memory = {
+      settings: { level: "error" },
+      rooms: {
+        W1N2: {
+          sources: { s1: { x: 10, y: 10 } },
+          scouted: 1,
+          unusable: "core",
+          coreLevel: 0
+        }
+      }
+    };
+    home.memory.remotes = [];
+  });
+
+  afterEach(() => {
+    Object.assign(global, saved);
+  });
+
+  function coreRoom(level: number, extras: Partial<RoomMemory> = {}): Room {
+    Memory.rooms.W1N2 = {
+      sources: { s1: { x: 10, y: 10 } },
+      scouted: Game.time,
+      unusable: "core",
+      coreLevel: level,
+      home: "W1N1",
+      ...extras
+    };
+    home.memory.remotes = ["W1N2"];
+
+    const core = {
+      structureType: STRUCTURE_INVADER_CORE,
+      level,
+      ticksToDeploy: 0,
+      pos: { x: 25, y: 25, roomName: "W1N2" }
+    };
+
+    const room = {
+      name: "W1N2",
+      memory: Memory.rooms.W1N2,
+      controller: undefined,
+      find: (type: number, opts?: { filter?: (s: unknown) => boolean }) => {
+        if (type === FIND_HOSTILE_STRUCTURES) {
+          const list = [core];
+          return opts?.filter ? list.filter(opts.filter) : list;
+        }
+        if (type === FIND_SOURCES) return [{ id: "s1", pos: { x: 10, y: 10 } }];
+        if (type === FIND_HOSTILE_CREEPS) return [];
+        if (type === FIND_STRUCTURES) return [];
+        return [];
+      },
+      getPositionAt: () => null
+    } as unknown as Room;
+    Game.rooms.W1N2 = room;
+    return room;
+  }
+
+  it("名单上的 0 级 core 标清核目标", () => {
+    coreRoom(0);
+    assert.equal(remoteCoreTarget(home), "W1N2");
+  });
+
+  it("1 级据点不标清核", () => {
+    coreRoom(1);
+    assert.isUndefined(remoteCoreTarget(home));
+  });
+
+  it("邻房侦到 0 级 core 时自动收回名单", () => {
+    Memory.rooms.W1N2 = {
+      sources: { s1: { x: 10, y: 10 } },
+      scouted: Game.time,
+      unusable: "core",
+      coreLevel: 0
+    };
+    home.getPositionAt = (x: number, y: number) =>
+      new ((global as unknown as { RoomPosition: new (x: number, y: number, roomName: string) => RoomPosition }).RoomPosition)(
+        x,
+        y,
+        home.name
+      );
+    const game = Game as unknown as {
+      map: { findExit?: () => number; getRoomTerrain?: () => { get: () => number } };
+    };
+    game.map.findExit = () => 1;
+    game.map.getRoomTerrain = () => ({ get: () => 0 });
+    (global as unknown as { PathFinder: unknown }).PathFinder = {
+      search: () => ({ path: [], incomplete: true })
+    };
+
+    runRemoteManager(home);
+
+    assert.include(home.memory.remotes ?? [], "W1N2");
+    assert.equal(Memory.rooms.W1N2.home, "W1N1");
+  });
+
+  it("survey 记下 coreLevel，核消失后清掉 unusable", () => {
+    const room = coreRoom(0);
+    surveyRoom(room);
+    assert.equal(Memory.rooms.W1N2.unusable, "core");
+    assert.equal(Memory.rooms.W1N2.coreLevel, 0);
+
+    room.find = (type: number) => {
+      if (type === FIND_SOURCES) return [{ id: "s1", pos: { x: 10, y: 10 } }];
+      return [];
+    };
+    surveyRoom(room);
+    assert.isUndefined(Memory.rooms.W1N2.unusable);
+    assert.isUndefined(Memory.rooms.W1N2.coreLevel);
+  });
+
+  it("没记 coreLevel 的旧 core 房立刻回访", () => {
+    Memory.rooms.W1N2 = { scouted: Game.time, unusable: "core" } as RoomMemory;
+    assert.equal(nextScoutTarget(home), "W1N2");
+  });
+});
+
 describe("拆迁工体型", () => {
-  it("两个 WORK 配一个 MOVE，平地上一格一 tick", () => {
+  it("WORK 和 MOVE 一比一，无路平地一格一 tick", () => {
     const body = bodyFor("dismantler", 800);
 
-    assert.equal(countPart(body, "work"), 6, "每 tick 砸 300 点血");
-    assert.equal(countPart(body, "move"), 4, "三组配三个，零头再买一个");
-    assert.equal(bodyCost(body), 800, "零头也花掉：没路的外矿，早到几十 tick 就早几十 tick 开工");
+    // 一组 WM=150；800 → 5 组 + 零头一个 MOVE
+    assert.equal(countPart(body, "work"), 5, "每 tick 砸 250 点血");
+    assert.equal(countPart(body, "move"), 6, "五组五个 MOVE，零头再买一个");
+    assert.isAtLeast(countPart(body, "move"), countPart(body, "work"), "无路平原要 MOVE ≥ WORK");
+    assert.equal(bodyCost(body), 800, "零头也花掉：没路的外矿，早到就早开工");
   });
 
   it("零头买 MOVE 而不是 CARRY，它不运东西", () => {

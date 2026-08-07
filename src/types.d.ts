@@ -45,6 +45,11 @@ interface CreepMemory {
   /** announce 上次喊过的内容，一样就不重复喊 */
   lastSay?: string;
   /**
+   * 正在逃命。有滞回：进了危险圈才置位，撤到安全距离以外才清掉，
+   * 免得刚跑出 6 格就回头干活、再被追上磨死。
+   */
+  fleeing?: boolean;
+  /**
    * 外派 creep 的目标房间。
    *
    * 和 room 是两回事：room 是它归哪个基地管（配额、物流都按这个算），
@@ -64,11 +69,17 @@ interface Console {
 }
 
 interface Memory {
-  /** 调试开关：日志级别、可视化模块、say */
+  /** 调试开关：日志级别、可视化模块、say、搓像素 */
   settings?: {
     level?: "error" | "warn" | "info" | "debug";
     visuals?: Partial<Record<"movement" | "logistics" | "planner" | "spawn" | "panel", boolean>>;
     say?: boolean;
+    /** 默认开；设为 false 停止空闲搓像素 */
+    pixels?: boolean;
+  };
+  /** 近期 CPU 用量平滑值，供搓像素判断是否空闲 */
+  cpu?: {
+    avg?: number;
   };
 }
 
@@ -100,6 +111,13 @@ interface RoomMemory {
    * 这里会建 container，矿工站在上面挖，能量直接落进容器。
    */
   miningSpots?: Record<string, { x: number; y: number }>;
+  /**
+   * 从这个外矿的源到基地的真实路程（各源取平均），由 planRemoteRoads 顺手记下。
+   *
+   * 运力定编按它算。直线距离在源躲在邻房远端时会小十几格，照那个数定编会
+   * 长期少派人，矿工的产出堆在地上蒸发。
+   */
+  pathLen?: number;
   /** 控制器旁边的能量堆放点，升级工站在它旁边取货 */
   upgradeSpot?: { x: number; y: number };
   /**
@@ -123,6 +141,8 @@ interface RoomMemory {
    * 也只用清掉自己这一段。读的时候两份取并集。
    */
   remoteRoads?: string;
+  /** 外矿路规划算法版本；低于代码里的 REMOTE_ROADS_REV 时有视野会重算 */
+  remoteRoadsRev?: number;
   /** 上次检查建造进度的 tick，用来控制检查频率 */
   lastBuildCheck?: number;
   /** 上次播报时房间里的敌人数量，数量没变就不重复刷屏 */
@@ -172,8 +192,16 @@ interface RoomMemory {
    *
    * owned/reserved 是被别人占了，keeper 是有 Source Keeper 守着，
    * core 是驻了 invader core，none 是压根没有能量源。
+   *
+   * 0 级 lesser core 会留在外矿名单里派 guardian 清；1+ 级据点仍放弃。
    */
   unusable?: "owned" | "reserved" | "keeper" | "core" | "none";
+  /**
+   * 上次看见的 StructureInvaderCore.level。
+   *
+   * 0 = 扇区 lesser core（可清）；≥1 = 据点（放弃）。无 core 时删除。
+   */
+  coreLevel?: number;
   /** 上次在这里撞见敌人的 tick，用来给外派人员放一段冷却 */
   raided?: number;
   /**

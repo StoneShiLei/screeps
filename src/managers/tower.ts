@@ -52,13 +52,25 @@ export function rampartHitsTarget(level: number): number {
 }
 
 /**
- * 手无寸铁的邻居进到这个距离以内才开火。
+ * 塔伤害随距离衰减：≤5 满伤 600，≥20 只剩 150，每炮固定耗 10 能量。
+ * ≥20 伤害不再降，再远开枪纯属被遛塔骗能量。
  *
- * 它们伤不了我们，打不打是笔纯经济账：一炮 10 能量，10 格上还有 450 伤害，
- * 两炮就能报销一个 300 能量的矿工，很划算。但 20 格外只剩 150 伤害，那种
- * 距离多半是贴着边界路过，追着打就是拿自己的能量换对方的通行费。
+ * 开火距离不能写死太短：分房里 bunker 和 controller 常隔十几格（E28S35
+ * spawn→controller 就是 18），敌人又从 controller 方向进——卡 15 等于放任
+ * 入口。默认以 20 为底，再按「塔到己方 controller + 入口余量」抬高。
+ *
+ * 抢矿邻居更严：打不死人，只在 SNIPE 内划得来时才开枪。
  */
+const ENGAGE_RANGE_FLOOR = 20;
+/** controller 再往外多打几格，盖住入口走廊，不只盖住控制器那一格 */
+const CONTROLLER_COVER = 5;
 const SNIPE_RANGE = 10;
+
+/** 这座塔打武装敌人该用多远；纯函数便于单测 */
+export function towerEngageRange(towerPos: RoomPosition, controller?: { my?: boolean; pos: RoomPosition } | null): number {
+  if (!controller?.my) return ENGAGE_RANGE_FLOOR;
+  return Math.max(ENGAGE_RANGE_FLOOR, towerPos.getRangeTo(controller.pos) + CONTROLLER_COVER);
+}
 
 export type TowerAction =
   | { kind: "attack"; target: Creep }
@@ -81,7 +93,10 @@ export function runTowers(room: Room): void {
 
   for (const tower of towers) {
     const energy = tower.store.getUsedCapacity(RESOURCE_ENERGY);
-    const action = chooseTowerAction({ pos: tower.pos, energy }, { hostiles, intruders, wounded, damaged });
+    const action = chooseTowerAction(
+      { pos: tower.pos, energy, engageRange: towerEngageRange(tower.pos, room.controller) },
+      { hostiles, intruders, wounded, damaged }
+    );
 
     switch (action.kind) {
       case "attack":
@@ -108,18 +123,18 @@ export function runTowers(room: Room): void {
  * 拆成纯函数是为了能直接对着优先级写测试，不用搭一个房间出来。
  */
 export function chooseTowerAction(
-  tower: { pos: RoomPosition; energy: number },
+  tower: { pos: RoomPosition; energy: number; engageRange?: number },
   targets: { hostiles: Creep[]; intruders?: Creep[]; wounded: Creep[]; damaged: Structure[] }
 ): TowerAction {
-  // 塔伤害随距离衰减，5 格内满伤 600，20 格外只剩 150，所以永远打最近的。
-  // 基地里几座塔挨得很近，各自选最近的结果基本就是集火——这正是想要的，
-  // 敌方带治疗时把伤害分散到两个目标上，等于一个都打不死。
-  const hostile = nearest(tower.pos, targets.hostiles);
+  // 只在 engageRange 内开火；同档里打最近的——几座塔挨着选最近≈集火，
+  // 敌方带奶时分散火力等于一个都打不死。
+  const engageRange = tower.engageRange ?? ENGAGE_RANGE_FLOOR;
+  const hostile = nearestInRange(tower.pos, targets.hostiles, engageRange);
   if (hostile) return { kind: "attack", target: hostile };
 
-  // 武装敌人清完了才轮到抢矿的，而且得在划得来的距离上
-  const intruder = nearest(tower.pos, targets.intruders ?? []);
-  if (intruder && tower.pos.getRangeTo(intruder.pos) <= SNIPE_RANGE) return { kind: "attack", target: intruder };
+  // 武装敌人清完（或不在射程）才轮到抢矿的，而且得在更划算的距离上
+  const intruder = nearestInRange(tower.pos, targets.intruders ?? [], SNIPE_RANGE);
+  if (intruder) return { kind: "attack", target: intruder };
 
   const patient = nearest(tower.pos, targets.wounded);
   if (patient) return { kind: "heal", target: patient };
@@ -131,15 +146,22 @@ export function chooseTowerAction(
 }
 
 function nearest<T extends { pos: RoomPosition }>(from: RoomPosition, candidates: T[]): T | undefined {
+  return nearestInRange(from, candidates, Infinity);
+}
+
+function nearestInRange<T extends { pos: RoomPosition }>(
+  from: RoomPosition,
+  candidates: T[],
+  maxRange: number
+): T | undefined {
   let best: T | undefined;
   let bestRange = Infinity;
 
   for (const candidate of candidates) {
     const range = from.getRangeTo(candidate.pos);
-    if (range < bestRange) {
-      best = candidate;
-      bestRange = range;
-    }
+    if (range > maxRange || range >= bestRange) continue;
+    best = candidate;
+    bestRange = range;
   }
 
   return best;

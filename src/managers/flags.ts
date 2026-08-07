@@ -85,13 +85,31 @@ function nearestHome(target: string): Room | undefined {
 }
 
 /**
- * 离目标最近、且开得起外矿的己方房间。
+ * 开得起外矿的己方房间里，优先高等级、同级再挑近的。
  *
- * E27S36 那种贴着新分房的外矿，若只按距离认领，会被 RCL1 的分房抢走名单——
- * 分房自己造不出远程矿工，主家又看不见，表现为"插了旗开不起外矿"。
+ * RCL1 也能开外矿（跨房 harvester），但贴着新分房的外矿若只按距离认领，会被
+ * 分房抢走名单——分房孵化预算窄、主家又看不见，完整挖运/预定还是主家更合适。
  */
 function nearestRemoteHome(target: string): Room | undefined {
-  return pickNearest(target, room => (room.controller?.level ?? 0) >= REMOTE_MIN_LEVEL);
+  let best: Room | undefined;
+  let bestLevel = -1;
+  let bestDistance = Infinity;
+
+  for (const room of Object.values(Game.rooms)) {
+    if (!room.controller?.my) continue;
+
+    const level = room.controller.level;
+    if (level < REMOTE_MIN_LEVEL) continue;
+
+    const distance = Game.map.getRoomLinearDistance(room.name, target);
+    if (level > bestLevel || (level === bestLevel && distance < bestDistance)) {
+      best = room;
+      bestLevel = level;
+      bestDistance = distance;
+    }
+  }
+
+  return best;
 }
 
 function pickNearest(target: string, accept: (room: Room) => boolean): Room | undefined {
@@ -125,23 +143,39 @@ function addRemote(home: Room, target: string): string | undefined {
   const memory = Memory.rooms[target];
   // 没侦察过就留着旗：scout 探完下一 tick 再兑现，别一把火把用户的意图烧了
   if (!memory?.scouted) return undefined;
-  // reserved 放行：名单收下、派预定员去抢；其它 unusable 硬碰硬打不过
-  if (memory.unusable && memory.unusable !== "reserved") {
+  // reserved / 0 级 core 放行；其它 unusable 硬碰硬打不过
+  if (memory.unusable && memory.unusable !== "reserved" && !isClearableCoreRemote(memory)) {
     return `${target} 采不了：${memory.unusable}`;
   }
 
   const remotes = home.memory.remotes ?? [];
   if (remotes.includes(target) && memory.home === home.name) {
-    return memory.unusable === "reserved"
-      ? `${target} 已经在 ${home.name} 的外矿名单里（抢预定中）`
-      : `${target} 已经在 ${home.name} 的外矿名单里`;
+    return remoteAlreadyText(target, home.name, memory);
   }
 
   enableRemote(home, target);
   const list = (home.memory.remotes ?? []).join(" ");
-  return memory.unusable === "reserved"
-    ? `${home.name} 外矿名单 → ${list}（${target} 被别人预定，派预定员去抢）`
-    : `${home.name} 外矿名单 → ${list}`;
+  return remoteAddedText(home.name, list, target, memory);
+}
+
+function isClearableCoreRemote(memory: RoomMemory): boolean {
+  return memory.unusable === "core" && memory.coreLevel === 0;
+}
+
+function remoteAlreadyText(target: string, homeName: string, memory: RoomMemory): string {
+  if (memory.unusable === "reserved") return `${target} 已经在 ${homeName} 的外矿名单里（抢预定中）`;
+  if (isClearableCoreRemote(memory)) return `${target} 已经在 ${homeName} 的外矿名单里（清核中）`;
+  return `${target} 已经在 ${homeName} 的外矿名单里`;
+}
+
+function remoteAddedText(homeName: string, list: string, target: string, memory: RoomMemory): string {
+  if (memory.unusable === "reserved") {
+    return `${homeName} 外矿名单 → ${list}（${target} 被别人预定，派预定员去抢）`;
+  }
+  if (isClearableCoreRemote(memory)) {
+    return `${homeName} 外矿名单 → ${list}（${target} 有 0 级 Invader Core，派协防兵清）`;
+  }
+  return `${homeName} 外矿名单 → ${list}`;
 }
 
 /** 控制台的 flaghelp 用这张表生成说明，不手写第二份 */

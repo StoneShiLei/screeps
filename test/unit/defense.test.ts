@@ -1,7 +1,8 @@
 import { assert } from "chai";
 import { bodyCost, bodyFor } from "../../src/utils/body";
 import { defendersNeeded, hostilesIn, intrudersIn, localDefenderCount, runDefender, stillArmed } from "../../src/roles/defender";
-import { chooseTowerAction, rampartHitsTarget } from "../../src/managers/tower";
+import { shouldActivateSafeMode } from "../../src/managers/safeMode";
+import { chooseTowerAction, rampartHitsTarget, towerEngageRange } from "../../src/managers/tower";
 import { installGameConstants } from "./mock";
 
 function countPart(body: BodyPartConstant[], part: BodyPartConstant): number {
@@ -236,6 +237,46 @@ describe("塔的目标选择", () => {
     assert.strictEqual(action.kind === "attack" && action.target, near);
   });
 
+  it("开火距离按塔到 controller 抬高：分房 bunker 远离入口时不能卡死在 15", () => {
+    // E28S35：spawn (14,27) → controller (32,10) = 18，再加入口余量 5 → 23
+    const towerPos = at(14, 27);
+    const controller = { my: true, pos: at(32, 10) };
+    assert.equal(towerEngageRange(towerPos, controller), 23);
+
+    const atController = creepAt(32, 10);
+    const pastEntrance = creepAt(35, 7); // 相对塔约 21，仍在 23 内
+    const action = chooseTowerAction(
+      { pos: towerPos, energy: 1000, engageRange: towerEngageRange(towerPos, controller) },
+      { hostiles: [pastEntrance, atController], wounded: [], damaged: [] }
+    );
+
+    assert.equal(action.kind, "attack");
+    assert.strictEqual(action.kind === "attack" && action.target, atController, "先打更近的，且 controller 必须在射程内");
+  });
+
+  it("伤害封底之外的遛塔不开火：≥20 伤不再降，再远开枪只是被骗能量", () => {
+    // 塔在 (25,25)，默认 engage=20；(46,25) 是 21 格
+    const action = chooseTowerAction(FULL, {
+      hostiles: [creepAt(46, 25)],
+      wounded: [],
+      damaged: []
+    });
+
+    assert.equal(action.kind, "idle", "够不着有效射程就别开枪");
+  });
+
+  it("远处武装敌人不挡治疗：遛塔时自家伤员照样治", () => {
+    const patient = creepAt(26, 25);
+    const action = chooseTowerAction(FULL, {
+      hostiles: [creepAt(46, 25)],
+      wounded: [patient],
+      damaged: []
+    });
+
+    assert.equal(action.kind, "heal");
+    assert.strictEqual(action.kind === "heal" && action.target, patient);
+  });
+
   it("没敌人才轮到治疗，治最近的", () => {
     const near = creepAt(24, 25);
     const action = chooseTowerAction(FULL, {
@@ -327,6 +368,61 @@ describe("塔的目标选择", () => {
     const action = chooseTowerAction(FULL, { hostiles: [], wounded: [], damaged: [] });
 
     assert.equal(action.kind, "idle");
+  });
+});
+
+describe("安全模式", () => {
+  beforeEach(() => installGameConstants());
+
+  function controller(extra: Partial<{ safeMode: number; safeModeAvailable: number; safeModeCooldown: number }> = {}) {
+    return {
+      my: true,
+      safeModeAvailable: 1,
+      activateSafeMode: () => 0,
+      ...extra
+    };
+  }
+
+  it("武装敌人拆掉 spawn 就该拉闸", () => {
+    assert.isTrue(
+      shouldActivateSafeMode(controller(), 1, [{ event: EVENT_OBJECT_DESTROYED, data: { type: "spawn" } }])
+    );
+  });
+
+  it("没敌人时不拉：多半是自己拆迁或自然朽掉", () => {
+    assert.isFalse(
+      shouldActivateSafeMode(controller(), 0, [{ event: EVENT_OBJECT_DESTROYED, data: { type: "extension" } }])
+    );
+  });
+
+  it("路和容器被毁不拉：那不是破防", () => {
+    assert.isFalse(
+      shouldActivateSafeMode(controller(), 2, [{ event: EVENT_OBJECT_DESTROYED, data: { type: "road" } }])
+    );
+    assert.isFalse(
+      shouldActivateSafeMode(controller(), 2, [{ event: EVENT_OBJECT_DESTROYED, data: { type: "container" } }])
+    );
+  });
+
+  it("没有可用次数或在冷却中就不试", () => {
+    assert.isFalse(
+      shouldActivateSafeMode(controller({ safeModeAvailable: 0 }), 1, [
+        { event: EVENT_OBJECT_DESTROYED, data: { type: "tower" } }
+      ])
+    );
+    assert.isFalse(
+      shouldActivateSafeMode(controller({ safeModeCooldown: 1000 }), 1, [
+        { event: EVENT_OBJECT_DESTROYED, data: { type: "tower" } }
+      ])
+    );
+  });
+
+  it("已经在安全模式里不再重复激活", () => {
+    assert.isFalse(
+      shouldActivateSafeMode(controller({ safeMode: 5000 }), 3, [
+        { event: EVENT_OBJECT_DESTROYED, data: { type: "spawn" } }
+      ])
+    );
   });
 });
 

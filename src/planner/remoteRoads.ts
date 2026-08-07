@@ -38,8 +38,23 @@ const MAX_ROOMS = 4;
 /** 同时最多开几个路面工地，让进度集中在一格上而不是摊在四十格里 */
 const MAX_ROAD_SITES = 2;
 
+/**
+ * 几级才开始在外矿拍容器工地。
+ *
+ * 一个容器 5000 能量，而它每 tick 只省下半点（掉落蒸发约 1 减去容器维护 0.5），
+ * 回本要一万 tick。RCL2 那 5000 能量拿去铺 extension 见效快得多，所以往后排。
+ */
+const REMOTE_CONTAINER_MIN_LEVEL = 3;
+
 /** 掉到这个比例以下才值得修。路有 5000 血，每 1000 tick 掉 100 */
 const REPAIR_THRESHOLD = 0.6;
+
+/**
+ * 外矿路规划算法版本。涨一号就会在有视野时重算一遍，用来修跨房错位这类存量问题。
+ *
+ * 2：顺手记下真实路程（pathLen），运力定编不再用偏小的直线距离。
+ */
+export const REMOTE_ROADS_REV = 2;
 
 /**
  * 算出从这个外矿到基地的路，按房间分段存进各自的 Memory。
@@ -59,6 +74,23 @@ export function planRemoteRoads(home: Room, roomName: string): void {
   const byRoom = new Map<string, Map<string, Coord>>();
   const matrices = new Map<string, CostMatrix>();
 
+  const remember = (name: string, x: number, y: number): void => {
+    // 房间交界那圈不铺：站上去就换房间了，路面留不住人也建不了工地
+    if (x === 0 || y === 0 || x === ROOM_SIZE - 1 || y === ROOM_SIZE - 1) return;
+    // 基地自己那圈路由布局表管
+    if (name === home.name && isBunkerCell(anchor.x, anchor.y, x, y)) return;
+
+    const cells = byRoom.get(name) ?? new Map<string, Coord>();
+    cells.set(`${x},${y}`, { x, y });
+    byRoom.set(name, cells);
+
+    // 后一条路线看到前一条已经铺过的格子就会拐过来汇进同一条主干，
+    // 而不是各走一条平行线——那样要多花一倍能量，维修面积也大一倍
+    matrices.get(name)?.set(x, y, ROAD_COST);
+  };
+
+  const lengths: number[] = [];
+
   for (const spot of Object.values(sources)) {
     const from = new RoomPosition(spot.x, spot.y, roomName);
     const result = PathFinder.search(from, entrances, {
@@ -74,20 +106,14 @@ export function planRemoteRoads(home: Room, roomName: string): void {
       continue;
     }
 
+    lengths.push(result.path.length);
+
     for (const step of result.path) {
-      // 房间交界那圈不铺：站上去就换房间了，路面留不住人也建不了工地
-      if (step.x === 0 || step.y === 0 || step.x === ROOM_SIZE - 1 || step.y === ROOM_SIZE - 1) continue;
-      // 基地自己那圈路由布局表管
-      if (step.roomName === home.name && isBunkerCell(anchor.x, anchor.y, step.x, step.y)) continue;
-
-      const cells = byRoom.get(step.roomName) ?? new Map<string, Coord>();
-      cells.set(`${step.x},${step.y}`, { x: step.x, y: step.y });
-      byRoom.set(step.roomName, cells);
-
-      // 后一条路线看到前一条已经铺过的格子就会拐过来汇进同一条主干，
-      // 而不是各走一条平行线——那样要多花一倍能量，维修面积也大一倍
-      matrices.get(step.roomName)?.set(step.x, step.y, ROAD_COST);
+      remember(step.roomName, step.x, step.y);
     }
+    // 出口格本身不铺，但两侧进房一格必须钉在同一条出口轴上，
+    // 否则 PathFinder 对角跨房后两边路会对不齐（E27S36 y=29 / E28S36 y=30）
+    alignBorderApproaches(result.path, remember);
   }
 
   for (const [name, cells] of byRoom) {
@@ -95,8 +121,67 @@ export function planRemoteRoads(home: Room, roomName: string): void {
     memory.remoteRoads = encodeCells([...cells.values()]);
   }
 
+  const remoteMemory = (Memory.rooms[roomName] ??= {} as RoomMemory);
+  remoteMemory.remoteRoadsRev = REMOTE_ROADS_REV;
+
+  // 这趟寻路走的正是运输队要走的路，长度存下来给运力定编用。直线距离在源躲在
+  // 邻房远端时会小十几格，照它定编就会一直少派人、产出堆在地上
+  if (lengths.length > 0) {
+    remoteMemory.pathLen = Math.round(lengths.reduce((sum, one) => sum + one, 0) / lengths.length);
+  }
+
   const total = [...byRoom.values()].reduce((sum, cells) => sum + cells.size, 0);
   log.info("外矿", `${roomName} → ${home.name} 的路线规划完毕，共 ${total} 格，跨 ${byRoom.size} 个房间`);
+}
+
+/**
+ * 出口格往房间里缩一格。交界圈本身不铺路，对接靠这一格对齐。
+ */
+export function inwardFromExit(x: number, y: number): Coord | undefined {
+  if (x === 0) return { x: 1, y };
+  if (x === ROOM_SIZE - 1) return { x: ROOM_SIZE - 2, y };
+  if (y === 0) return { x, y: 1 };
+  if (y === ROOM_SIZE - 1) return { x, y: ROOM_SIZE - 2 };
+  return undefined;
+}
+
+/**
+ * 跨房处两侧各钉一格，共享出口轴（东西邻房同 y，南北邻房同 x）。
+ *
+ * PathFinder 允许对角进出，路径里房内第一格的次坐标可能和出口不一致；
+ * 只按路径原样铺就会出现两边路错开一行。
+ */
+export function alignBorderApproaches(
+  path: { x: number; y: number; roomName: string }[],
+  remember: (roomName: string, x: number, y: number) => void
+): void {
+  for (let i = 0; i < path.length - 1; i++) {
+    const a = path[i];
+    const b = path[i + 1];
+    if (a.roomName === b.roomName) continue;
+
+    const inwardA = inwardFromExit(a.x, a.y);
+    const inwardB = inwardFromExit(b.x, b.y);
+    if (inwardA) remember(a.roomName, inwardA.x, inwardA.y);
+    if (inwardB) remember(b.roomName, inwardB.x, inwardB.y);
+    if (inwardA && inwardB) continue;
+
+    // 路径偶尔跳过出口格，按邻接方向用离开侧的次坐标对齐两侧
+    const dir = Game.map.findExit(a.roomName, b.roomName);
+    if (dir === FIND_EXIT_RIGHT) {
+      remember(a.roomName, ROOM_SIZE - 2, a.y);
+      remember(b.roomName, 1, a.y);
+    } else if (dir === FIND_EXIT_LEFT) {
+      remember(a.roomName, 1, a.y);
+      remember(b.roomName, ROOM_SIZE - 2, a.y);
+    } else if (dir === FIND_EXIT_BOTTOM) {
+      remember(a.roomName, a.x, ROOM_SIZE - 2);
+      remember(b.roomName, a.x, 1);
+    } else if (dir === FIND_EXIT_TOP) {
+      remember(a.roomName, a.x, 1);
+      remember(b.roomName, a.x, ROOM_SIZE - 2);
+    }
+  }
 }
 
 /**
@@ -194,23 +279,18 @@ export function remoteRoadCells(roomName: string): Coord[] {
  * 在外矿房间里拍容器和路面工地。
  *
  * 房间不归我们，`runRoomPlanner` 不管它，所以这件事挂在"有视野时看一眼"那条
- * 路径上。容器不看老家等级——无主/预定房间里照样拍得下；路仍按老家等级解锁。
- * 容器优先占工地名额：矿边桶比路面更直接影响产出。
+ * 路径上。容器优先占工地名额：矿边桶比路面更直接影响产出。路按老家等级解锁。
+ *
+ * 容器要等到 REMOTE_CONTAINER_MIN_LEVEL：它要 5000 能量，等于这个源整整一千
+ * tick 的全部产出，而它省下来的只有掉落蒸发（每源约 1 能量/tick）减去容器自己
+ * 的维护（0.5），净赚半点，回本要一万 tick。RCL2 正缺能量铺 extension，
+ * 那笔投资排在后面；在那之前纯掉落挖矿，运输队照样把地上的搬走。
  */
 export function maintainRemoteSites(room: Room, level: number, minLevel: number): void {
   let open = room.find(FIND_MY_CONSTRUCTION_SITES).length;
 
-  for (const spot of Object.values(room.memory.miningSpots ?? {})) {
-    if (open >= MAX_ROAD_SITES) return;
-
-    const position = room.getPositionAt(spot.x, spot.y);
-    if (!position) continue;
-    if (position.lookFor(LOOK_STRUCTURES).some(structure => structure.structureType === STRUCTURE_CONTAINER)) {
-      continue;
-    }
-    if (position.lookFor(LOOK_CONSTRUCTION_SITES).length > 0) continue;
-
-    if (room.createConstructionSite(spot.x, spot.y, STRUCTURE_CONTAINER) === OK) open++;
+  if (level >= REMOTE_CONTAINER_MIN_LEVEL) {
+    open = planContainerSites(room, open);
   }
 
   if (level < minLevel) return;
@@ -225,6 +305,25 @@ export function maintainRemoteSites(room: Room, level: number, minLevel: number)
 
     if (room.createConstructionSite(cell.x, cell.y, STRUCTURE_ROAD) === OK) open++;
   }
+}
+
+function planContainerSites(room: Room, opened: number): number {
+  let open = opened;
+
+  for (const spot of Object.values(room.memory.miningSpots ?? {})) {
+    if (open >= MAX_ROAD_SITES) return open;
+
+    const position = room.getPositionAt(spot.x, spot.y);
+    if (!position) continue;
+    if (position.lookFor(LOOK_STRUCTURES).some(structure => structure.structureType === STRUCTURE_CONTAINER)) {
+      continue;
+    }
+    if (position.lookFor(LOOK_CONSTRUCTION_SITES).length > 0) continue;
+
+    if (room.createConstructionSite(spot.x, spot.y, STRUCTURE_CONTAINER) === OK) open++;
+  }
+
+  return open;
 }
 
 /** 这条路线上磨损最重的一格，给派驻的拓荒者修 */

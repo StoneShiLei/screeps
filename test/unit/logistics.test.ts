@@ -15,9 +15,10 @@ import { bodyCost, bodyFor } from "../../src/utils/body";
 import { gatherEnergy } from "../../src/utils/energy";
 import { haulersForBacklog } from "../../src/managers/spawnManager";
 import { installGameConstants } from "./mock";
-import { runHauler } from "../../src/roles/hauler";
+import { filterHaulerSupplies, runHauler } from "../../src/roles/hauler";
+import { runRemoteHauler } from "../../src/roles/remoteHauler";
 import { runUpgrader } from "../../src/roles/upgrader";
-import { splitDemands } from "../../src/managers/panel";
+import { urgentDemand, usableEnergy } from "../../src/managers/panel";
 
 function entry(id: string, x: number, y: number, amount: number, priority: number): LogisticsEntry {
   return { id, x, y, amount, priority };
@@ -48,18 +49,36 @@ describe("体型生成", () => {
     assert.isTrue(bodyFor("miner", 650).includes("carry"));
   });
 
-  it("搬运工的 CARRY 和 MOVE 一比一，满载也能全速跑", () => {
-    const body = bodyFor("hauler", 600);
+  it("本房搬运工 RCL4+ 按有路配 2:1，满载走路上 1t/格", () => {
+    const body = bodyFor("hauler", 600, undefined, 4);
 
-    assert.equal(countPart(body, "carry"), countPart(body, "move"));
+    assert.equal(countPart(body, "carry"), 8);
+    assert.equal(countPart(body, "move"), 4);
+    assert.equal(countPart(body, "carry"), countPart(body, "move") * 2);
+  });
+
+  it("本房搬运工 RCL2/3 还没平原路，按无路 1:1，避免满载 2t/格", () => {
+    for (const level of [2, 3]) {
+      const body = bodyFor("hauler", 600, undefined, level);
+      assert.equal(countPart(body, "carry"), countPart(body, "move"), `RCL${level} 应无路 1:1`);
+    }
+  });
+
+  it("本房建造工 RCL2/3 按无路 1:1:2，满载平原也能 1t", () => {
+    const body = bodyFor("builder", 800, undefined, 2);
+    assert.equal(countPart(body, "work"), 3);
+    assert.equal(countPart(body, "carry"), 3);
+    assert.equal(countPart(body, "move"), 6);
   });
 
   it("除不尽一组的预算下，纯搬运也不补零头：宁可扔掉零头也不掉到 2t/格", () => {
-    // 550 里五组 CARRY+MOVE 花 500，剩 50 正好够一个 CARRY——旧逻辑会补上，
-    // 结果 6 CARRY 配 5 MOVE，满载就成了两 tick 一格。现在宁可把这 50 扔了
-    for (const role of ["hauler", "looter", "remoteHauler"] as const) {
+    // 本房 hauler 有路是 2C1M；外矿/外房与早期本房仍是 1:1。多补 CARRY 都会破比。
+    const home = bodyFor("hauler", 550, undefined, 4);
+    assert.equal(countPart(home, "carry"), countPart(home, "move") * 2, "hauler 有路 2:1");
+
+    for (const role of ["looter", "remoteHauler"] as const) {
       const body = bodyFor(role, 550);
-      assert.equal(countPart(body, "carry"), countPart(body, "move"), `${role} 的 CARRY 不该比 MOVE 多`);
+      assert.equal(countPart(body, "carry"), countPart(body, "move"), `${role} 无路 1:1`);
     }
   });
 
@@ -82,12 +101,24 @@ describe("体型生成", () => {
     assert.equal(body[body.length - 1], "move");
   });
 
-  it("凑不满一整组的零头不浪费", () => {
+  it("早期 harvester 按无路满速：MOVE 盖住 WORK+满载 CARRY", () => {
     const body = bodyFor("harvester", 300);
 
-    assert.equal(bodyCost(body), 300, "一组 WORK CARRY MOVE 只要 200，剩的 100 得花出去");
-    assert.equal(countPart(body, "carry"), 2, "零头买成运力，容量直接翻倍");
-    assert.equal(countPart(body, "move"), 2, "加了部件就得配套加 MOVE，不然走不动");
+    // 一组 W+C+M+M=250；剩 50 不补 CARRY，免得破平原比
+    assert.equal(countPart(body, "work"), 1);
+    assert.equal(countPart(body, "carry"), 1);
+    assert.equal(countPart(body, "move"), 2);
+    assert.isAtLeast(countPart(body, "move"), countPart(body, "work") + countPart(body, "carry"));
+  });
+
+  it("本房 builder 有路时零头可补 CARRY，并按有路比补 MOVE", () => {
+    const body = bodyFor("builder", 300, undefined, 4);
+
+    assert.equal(bodyCost(body), 300, "一组 WCM=200，剩 100 花掉");
+    assert.isAtLeast(countPart(body, "carry"), 1);
+    const move = countPart(body, "move");
+    const heavy = countPart(body, "work") + countPart(body, "carry");
+    assert.isAtLeast(move * 2, heavy, "路上满载应能 1t/格");
   });
 
   it("低预算的矿工靠零头换来一个 CARRY", () => {
@@ -113,6 +144,14 @@ describe("体型生成", () => {
 
   it("不给上限时仍按模板的默认规模来", () => {
     assert.equal(countPart(bodyFor("upgrader", 12900), "work"), 8, "低等级房间养不起满编升级工");
+  });
+
+  it("静态升级工只要一个 MOVE，预算堆在 WORK 上", () => {
+    const body = bodyFor("upgrader", 1300);
+
+    assert.equal(countPart(body, "move"), 1, "钉站等粮，走到站位够用");
+    assert.equal(countPart(body, "carry"), 1);
+    assert.equal(countPart(body, "work"), 8, "默认封顶 8；RCL8 另给 repeatLimit");
   });
 
   it("不会超过五十个身体部件的硬性上限", () => {
@@ -491,7 +530,7 @@ describe("缓冲桶补货区间", () => {
     } as unknown as Room;
   }
 
-  it("刚过 500 的桶照样挂在需求表上，一路补到 1500", () => {
+  it("刚过 500 的桶照样挂在需求表上，一路补到满", () => {
     // 旧逻辑两条线画在同一个数上：低于 500 才进需求表、高于 500 才算供给。桶于是
     // 稳定停在五百出头——搬运工不认它，工人能取的又不够起送量，e28s36 的 builder
     // 整房站着不动就是卡在这道缝里
@@ -499,7 +538,7 @@ describe("缓冲桶补货区间", () => {
 
     const buffer = demands.find(demand => demand.id === "缓冲桶");
     assert.isDefined(buffer, "桶没装满就该一直缺货");
-    assert.equal(buffer?.amount, 1500 - 542, "缺口按补到 1500 算");
+    assert.equal(buffer?.amount, 2000 - 542, "缺口按补满算");
   });
 
   it("桶里的货工人全都能取，不留垫底", () => {
@@ -509,10 +548,84 @@ describe("缓冲桶补货区间", () => {
     assert.equal(buffer?.amount, 542, "留底只会把工人饿住，它本来就是给工人现取现用的");
   });
 
-  it("装满 1500 就退出需求表", () => {
+  it("装满才退出需求表", () => {
+    const { demands } = logisticsOf(roomWithBuffer(2000));
+
+    assert.isEmpty(demands, "满了就别再往里灌，运力该去别处");
+  });
+
+  it("1500 还没满，继续挂需求", () => {
     const { demands } = logisticsOf(roomWithBuffer(1500));
 
-    assert.isEmpty(demands, "补够了就别再往里灌，运力该去别处");
+    assert.equal(demands.find(d => d.id === "缓冲桶")?.amount, 500);
+  });
+});
+
+describe("建造期抽空控制器粮仓", () => {
+  let saved: { Game: unknown; Memory: unknown };
+
+  beforeEach(() => {
+    installGameConstants();
+    const context = global as unknown as typeof saved;
+    saved = { Game: context.Game, Memory: context.Memory };
+
+    context.Game = { creeps: {}, rooms: {}, time: Math.floor(Math.random() * 1e6), getObjectById: () => null };
+    context.Memory = { rooms: {}, creeps: {} };
+  });
+
+  afterEach(() => {
+    Object.assign(global, saved);
+  });
+
+  function roomWithGranary(energy: number, sites: number): Room {
+    const spot = { x: 14, y: 21 };
+    const granary = {
+      id: "粮仓",
+      structureType: "container",
+      pos: spot,
+      store: {
+        energy,
+        getFreeCapacity: () => 2000 - energy,
+        getCapacity: () => 2000
+      }
+    };
+
+    return {
+      name: `W${Math.floor(Math.random() * 1e6)}N1`,
+      // ticksToDowngrade 给足，别误触防降级
+      controller: { level: 4, my: true, ticksToDowngrade: 30000 },
+      memory: { upgradeSpot: spot },
+      find: (type: number) => {
+        if (type === FIND_STRUCTURES) return [granary];
+        if (type === FIND_MY_CONSTRUCTION_SITES) {
+          return Array.from({ length: sites }, (_, i) => ({ id: `site${i}`, structureType: "extension" }));
+        }
+        return [];
+      }
+    } as unknown as Room;
+  }
+
+  it("有工地时粮仓挂成供给，别把几百点锁在升级工嘴里", () => {
+    // 建造优先停了升级工、又不往粮仓灌——旧逻辑还把它从供给表里划掉，
+    // 518 就永远卡在桶里。开放成缓冲档，让 builder / 搬运工抽空去造
+    const { supplies, demands } = logisticsOf(roomWithGranary(518, 3));
+
+    assert.isUndefined(
+      demands.find(demand => demand.id === "粮仓"),
+      "建造期不往粮仓灌"
+    );
+    const supply = supplies.find(entry => entry.id === "粮仓");
+    assert.equal(supply?.amount, 518, "桶里的货该给建造用");
+    assert.equal(supply?.priority, SUPPLY_PRIORITY.buffer);
+  });
+
+  it("没工地时粮仓仍是升级工私产，不进供给表", () => {
+    const { supplies } = logisticsOf(roomWithGranary(518, 0));
+
+    assert.isUndefined(
+      supplies.find(entry => entry.id === "粮仓"),
+      "恢复喂粮仓之后别让搬运工把升级工的饭端走"
+    );
   });
 });
 
@@ -633,6 +746,40 @@ describe("静态升级工的认领", () => {
 
     assert.equal(creep.memory.station?.x, station.x, "有 hauler 时原地等粮，不放弃站位");
     assert.isAbove(creep.memory.idleTicks ?? 0, 50, "还在计数，只是不因此出门");
+  });
+
+  it("建造优先时身上有能量仍灌控制器，不干站着", () => {
+    const controller = { my: true, level: 3, ticksToDowngrade: 15000 };
+    const room = {
+      name: "W1N3",
+      controller,
+      memory: {},
+      find: (type: number) => {
+        if (type === FIND_MY_CONSTRUCTION_SITES) {
+          return [{ structureType: STRUCTURE_EXTENSION }];
+        }
+        return [];
+      }
+    } as unknown as Room;
+
+    let upgraded = 0;
+    const creep = {
+      name: "upgrader_3",
+      memory: { role: "upgrader", room: room.name, working: true, station: { x: 10, y: 10 } },
+      room,
+      pos: { x: 25, y: 25, roomName: room.name, getRangeTo: () => 1 },
+      store: { energy: 50, getFreeCapacity: () => 0 },
+      say: () => 0,
+      upgradeController: () => {
+        upgraded++;
+        return OK;
+      }
+    } as unknown as Creep;
+
+    runUpgrader(creep);
+
+    assert.isAtLeast(upgraded, 1, "建造期也不该浪费身上的能量");
+    assert.isUndefined(creep.memory.station, "等建时让出站位");
   });
 });
 
@@ -835,8 +982,8 @@ describe("搬运工兜底投喂", () => {
       id: "粮仓",
       structureType: "container",
       pos: spot,
-      // 补到 1500 就不再进需求表
-      store: store(1500, 2000)
+      // 满仓才不再进需求表
+      store: store(2000, 2000)
     };
     const spawn = {
       id: "spawn1",
@@ -907,7 +1054,7 @@ describe("搬运工兜底投喂", () => {
 
   it("也投喂来扶持分房的拓荒者，别让它耗一半时间自己找饭", () => {
     const spot = { x: 14, y: 21 };
-    const granary = { id: "粮仓", structureType: "container", pos: spot, store: store(1500, 2000) };
+    const granary = { id: "粮仓", structureType: "container", pos: spot, store: store(2000, 2000) };
     const spawn = { id: "spawn1", structureType: "spawn", pos: { x: 20, y: 20 }, store: store(300, 300) };
 
     const roomName = `W${Math.floor(Math.random() * 1e6)}N5`;
@@ -1039,33 +1186,346 @@ describe("搬运工兜底投喂", () => {
 
     assert.deepEqual(transferred, ["spawn1"], "房间还急着孵化时，投喂不能抢运力");
   });
+
+  it("remoteHauler 回家后建筑已满就投喂 builder，别满载干站", () => {
+    const spawn = { id: "spawn1", structureType: "spawn", pos: { x: 20, y: 20 }, store: store(300, 300) };
+    const roomName = `W${Math.floor(Math.random() * 1e6)}N5`;
+    const room = {
+      name: roomName,
+      memory: { anchor: { x: 25, y: 25 } },
+      find: (type: number) => {
+        if (type === FIND_MY_STRUCTURES) return [spawn];
+        if (type === FIND_STRUCTURES) return [spawn];
+        if (type === FIND_MY_CREEPS) return [];
+        if (type === FIND_MY_CONSTRUCTION_SITES) return [{ id: "site1" }];
+        if (type === FIND_DROPPED_RESOURCES) return [];
+        if (type === FIND_TOMBSTONES) return [];
+        if (type === FIND_RUINS) return [];
+        return [];
+      }
+    } as unknown as Room;
+
+    const builder = {
+      name: "builder_1",
+      memory: { role: "builder", room: roomName },
+      room,
+      pos: { x: 5, y: 5, roomName },
+      store: store(0, 250)
+    };
+
+    const transferred: string[] = [];
+    const hauler = {
+      name: "remoteHauler_1",
+      memory: { role: "remoteHauler", room: roomName, working: true, targetRoom: "W1N2" },
+      room,
+      pos: {
+        x: 25,
+        y: 25,
+        roomName,
+        findClosestByRange: (_type: number, opts: { filter: (c: unknown) => boolean }) =>
+          [builder].find(opts.filter) ?? null
+      },
+      store: store(150, 150),
+      say: () => 0,
+      transfer: (target: { name?: string; id?: string }) => {
+        transferred.push(target.name ?? target.id ?? "?");
+        return 0;
+      }
+    } as unknown as Creep;
+
+    (global as unknown as { Game: { rooms: Record<string, Room>; getObjectById: (id: string) => unknown; creeps: Record<string, unknown> } }).Game.rooms =
+      { [roomName]: room };
+    (global as unknown as { Game: { getObjectById: (id: string) => unknown } }).Game.getObjectById = id =>
+      (id === "spawn1" ? { ...spawn, room } : null);
+    (global as unknown as { Game: { creeps: Record<string, unknown> } }).Game.creeps = {
+      remoteHauler_1: hauler,
+      builder_1: builder
+    };
+
+    runRemoteHauler(hauler);
+
+    assert.deepEqual(transferred, ["builder_1"], "无处卸建筑时能量应转给建造工");
+  });
 });
 
-describe("面板缺口口径", () => {
+describe("搬运工卸完半载先补满", () => {
+  let saved: { Game: unknown; Memory: unknown };
+
+  beforeEach(() => {
+    installGameConstants();
+    const context = global as unknown as typeof saved;
+    saved = { Game: context.Game, Memory: context.Memory };
+    context.Game = { creeps: {}, rooms: {}, time: Math.floor(Math.random() * 1e6), getObjectById: () => null };
+    context.Memory = { rooms: {}, creeps: {} };
+  });
+
+  afterEach(() => {
+    Object.assign(global, saved);
+  });
+
+  function store(energy: number, capacity: number): unknown {
+    return {
+      energy,
+      getFreeCapacity: (resource?: string) => (resource === "energy" || resource === undefined ? capacity - energy : 0),
+      getCapacity: () => capacity
+    };
+  }
+
+  it("上一趟卸完还有空位且矿边有货时先补货，不半载接下一个 extension", () => {
+    const spot = { x: 10, y: 10 };
+    const sourceContainer = {
+      id: "矿边桶",
+      structureType: "container",
+      pos: spot,
+      store: store(800, 2000)
+    };
+    const spawn = {
+      id: "spawn1",
+      structureType: "spawn",
+      pos: { x: 20, y: 20 },
+      store: store(200, 300)
+    };
+
+    const roomName = `W${Math.floor(Math.random() * 1e6)}N7`;
+    const room = {
+      name: roomName,
+      memory: { miningSpots: { s1: spot }, anchor: { x: 25, y: 25 } },
+      find: (type: number) => {
+        if (type === FIND_MY_STRUCTURES) return [spawn];
+        if (type === FIND_STRUCTURES) return [spawn, sourceContainer];
+        if (type === FIND_MY_CREEPS) return [];
+        if (type === FIND_MY_CONSTRUCTION_SITES) return [];
+        if (type === FIND_DROPPED_RESOURCES) return [];
+        if (type === FIND_TOMBSTONES) return [];
+        if (type === FIND_RUINS) return [];
+        return [];
+      }
+    } as unknown as Room;
+
+    const transferred: string[] = [];
+    const withdrew: string[] = [];
+    const hauler = {
+      name: "hauler_1",
+      // 刚卸完：没 deliverTo、半载、working 还是 true——旧逻辑会直接去填 spawn
+      memory: { role: "hauler", room: roomName, working: true },
+      room,
+      pos: {
+        x: 19,
+        y: 20,
+        roomName,
+        getRangeTo: () => 1,
+        findClosestByPath: () => null,
+        findClosestByRange: () => null
+      },
+      store: store(100, 200),
+      say: () => 0,
+      transfer: (target: { id?: string }) => {
+        transferred.push(target.id ?? "?");
+        return 0;
+      },
+      withdraw: (target: { id?: string }) => {
+        withdrew.push(target.id ?? "?");
+        return OK;
+      }
+    } as unknown as Creep;
+
+    const objects: Record<string, unknown> = {
+      spawn1: { ...spawn, room },
+      矿边桶: { ...sourceContainer, room }
+    };
+    (global as unknown as { Game: { rooms: Record<string, Room>; getObjectById: (id: string) => unknown; creeps: Record<string, unknown> } }).Game.rooms =
+      { [roomName]: room };
+    (global as unknown as { Game: { getObjectById: (id: string) => unknown } }).Game.getObjectById = id => objects[id] ?? null;
+    (global as unknown as { Game: { creeps: Record<string, unknown> } }).Game.creeps = { hauler_1: hauler };
+
+    runHauler(hauler);
+
+    assert.isFalse(hauler.memory.working, "应切回取货");
+    assert.deepEqual(transferred, [], "半载时不该先去填建筑");
+    assert.deepEqual(withdrew, ["矿边桶"], "有空位应先去矿边补满");
+  });
+
+  it("没货可补时半载仍去送，别干站着", () => {
+    const spawn = {
+      id: "spawn1",
+      structureType: "spawn",
+      pos: { x: 20, y: 20 },
+      store: store(200, 300)
+    };
+
+    const roomName = `W${Math.floor(Math.random() * 1e6)}N8`;
+    const room = {
+      name: roomName,
+      memory: { anchor: { x: 25, y: 25 } },
+      find: (type: number) => {
+        if (type === FIND_MY_STRUCTURES) return [spawn];
+        if (type === FIND_STRUCTURES) return [spawn];
+        if (type === FIND_MY_CREEPS) return [];
+        if (type === FIND_MY_CONSTRUCTION_SITES) return [];
+        if (type === FIND_DROPPED_RESOURCES) return [];
+        if (type === FIND_TOMBSTONES) return [];
+        if (type === FIND_RUINS) return [];
+        return [];
+      }
+    } as unknown as Room;
+
+    const transferred: string[] = [];
+    const hauler = {
+      name: "hauler_1",
+      memory: { role: "hauler", room: roomName, working: true },
+      room,
+      pos: {
+        x: 19,
+        y: 20,
+        roomName,
+        getRangeTo: () => 1,
+        findClosestByPath: () => null,
+        findClosestByRange: () => null
+      },
+      store: store(100, 200),
+      say: () => 0,
+      transfer: (target: { id?: string }) => {
+        transferred.push(target.id ?? "?");
+        return 0;
+      }
+    } as unknown as Creep;
+
+    (global as unknown as { Game: { rooms: Record<string, Room>; getObjectById: (id: string) => unknown; creeps: Record<string, unknown> } }).Game.rooms =
+      { [roomName]: room };
+    (global as unknown as { Game: { getObjectById: (id: string) => unknown } }).Game.getObjectById = id =>
+      (id === "spawn1" ? { ...spawn, room } : null);
+    (global as unknown as { Game: { creeps: Record<string, unknown> } }).Game.creeps = { hauler_1: hauler };
+
+    runHauler(hauler);
+
+    assert.isTrue(hauler.memory.working, "没货可补就继续送");
+    assert.deepEqual(transferred, ["spawn1"]);
+  });
+});
+
+describe("面板缺口与可用能量", () => {
   it("只有 spawn、extension 和 tower 算缺口", () => {
     const demands = [
       entry("扩展", 10, 10, 300, DEMAND_PRIORITY.spawn),
-      entry("塔", 12, 12, 200, DEMAND_PRIORITY.tower)
+      entry("塔", 12, 12, 200, DEMAND_PRIORITY.tower),
+      entry("缓冲桶", 15, 35, 2000, DEMAND_PRIORITY.buffer)
     ];
 
-    assert.deepEqual(splitDemands(demands), { missing: 500, stashing: 0 });
+    assert.equal(urgentDemand(demands), 500, "容器空位不掺进缺口");
   });
 
-  it("容器的空位算囤货，不混进缺口", () => {
-    // 控制器旁的桶和 bunker 缓冲桶各 2000 容量，按定义就该是没满的状态。
-    // 全部求和会让缺口常年显示四千上下，看着像随时要断供
-    const demands = [
-      entry("控制器桶", 10, 10, 1888, DEMAND_PRIORITY.controller),
-      entry("缓冲桶", 15, 35, 2000, DEMAND_PRIORITY.buffer),
-      entry("扩展", 20, 20, 50, DEMAND_PRIORITY.spawn)
+  it("可用能量合计所有能取出来的供给，含 storage 和缓冲", () => {
+    const supplies = [
+      entry("掉落", 1, 1, 100, SUPPLY_PRIORITY.dropped),
+      entry("矿边", 5, 5, 800, SUPPLY_PRIORITY.source),
+      entry("缓冲", 10, 10, 500, SUPPLY_PRIORITY.buffer),
+      entry("仓库", 15, 15, 12000, SUPPLY_PRIORITY.storage)
     ];
 
-    assert.deepEqual(splitDemands(demands), { missing: 50, stashing: 3888 });
+    assert.equal(usableEnergy(supplies), 13400);
   });
 
   it("待运口径覆盖 salvage 和矿边，自己的库存不进待运", () => {
     assert.equal(SUPPLY_PRIORITY.salvage, 1);
     assert.equal(SUPPLY_PRIORITY.source, 2);
     assert.isAbove(SUPPLY_PRIORITY.storage, SUPPLY_PRIORITY.source);
+  });
+});
+
+describe("搬运工取货闸（有 storage 之后）", () => {
+  const mine = entry("矿边", 5, 5, 1000, SUPPLY_PRIORITY.source);
+  const buffer = entry("缓冲", 10, 10, 800, SUPPLY_PRIORITY.buffer);
+  const stock = entry("仓库", 15, 15, 5000, SUPPLY_PRIORITY.storage);
+  const supplies = [mine, buffer, stock];
+
+  it("只有 storage 缺货时不掏缓冲、也不动库存", () => {
+    const demands = [entry("仓", 15, 15, 100000, DEMAND_PRIORITY.storage)];
+    const usable = filterHaulerSupplies(supplies, demands);
+
+    assert.deepEqual(
+      usable.map(e => e.id),
+      ["矿边"],
+      "灌仓只吃矿边溢出，别端走工人近粮或仓内自转"
+    );
+  });
+
+  it("spawn 急缺时允许掏缓冲和库存回补", () => {
+    const demands = [entry("spawn", 20, 20, 300, DEMAND_PRIORITY.spawn)];
+    const usable = filterHaulerSupplies(supplies, demands);
+
+    assert.sameMembers(
+      usable.map(e => e.id),
+      ["矿边", "缓冲", "仓库"]
+    );
+  });
+
+  it("粮仓缺货可动库存，但不为灌粮仓掏缓冲", () => {
+    const demands = [entry("粮仓", 12, 12, 500, DEMAND_PRIORITY.controller)];
+    const usable = filterHaulerSupplies(supplies, demands);
+
+    assert.sameMembers(usable.map(e => e.id), ["矿边", "仓库"]);
+  });
+
+  it("完全没需求时只捡矿边及更急的货", () => {
+    const usable = filterHaulerSupplies(supplies, []);
+
+    assert.deepEqual(
+      usable.map(e => e.id),
+      ["矿边"]
+    );
+  });
+});
+
+describe("遗迹与墓碑起送量", () => {
+  let saved: { Game: unknown; Memory: unknown };
+
+  beforeEach(() => {
+    installGameConstants();
+    const context = global as unknown as typeof saved;
+    saved = { Game: context.Game, Memory: context.Memory };
+
+    context.Game = { creeps: {}, rooms: {}, time: Math.floor(Math.random() * 1e6), getObjectById: () => null };
+    context.Memory = { rooms: {}, creeps: {} };
+  });
+
+  afterEach(() => {
+    Object.assign(global, saved);
+  });
+
+  function roomWith(ruinEnergy: number, tombEnergy: number): Room {
+    const ruin = {
+      id: "ruin1",
+      destroyTime: 1,
+      pos: { x: 10, y: 10 },
+      store: { energy: ruinEnergy }
+    };
+    const tomb = {
+      id: "tomb1",
+      deathTime: 1,
+      pos: { x: 11, y: 11 },
+      store: { energy: tombEnergy }
+    };
+
+    return {
+      name: `W${Math.floor(Math.random() * 1e6)}N9`,
+      memory: {},
+      find: (type: number) => {
+        if (type === FIND_RUINS) return [ruin];
+        if (type === FIND_TOMBSTONES) return [tomb];
+        return [];
+      }
+    } as unknown as Room;
+  }
+
+  it("遗迹哪怕只有十几能量也挂进供给表", () => {
+    const { supplies } = logisticsOf(roomWith(18, 0));
+
+    assert.equal(supplies.find(s => s.id === "ruin1")?.amount, 18);
+  });
+
+  it("墓碑低于五十就不挂，不值得专程跑", () => {
+    const { supplies } = logisticsOf(roomWith(0, 18));
+
+    assert.isUndefined(supplies.find(s => s.id === "tomb1"));
   });
 });

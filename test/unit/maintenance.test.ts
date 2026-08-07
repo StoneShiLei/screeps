@@ -5,7 +5,7 @@ import { flagHelpText, runFlagDirectives } from "../../src/managers/flags";
 import { installGameConstants } from "./mock";
 import { isPlanned } from "../../src/planner/roomPlanner";
 import { isRetiring, reliefSlots, ticksPerStep } from "../../src/managers/relief";
-import { SPAWN_PRIORITY, spawnQueue } from "../../src/managers/spawnManager";
+import { SPAWN_PRIORITY, spawnQueue, upgradersAffordable } from "../../src/managers/spawnManager";
 
 /** 一个只有 memory 的假房间，isPlanned 要的就是图纸 */
 function planned(memory: Partial<RoomMemory>): Room {
@@ -298,8 +298,8 @@ describe("旗子指令", () => {
     assert.notInclude(Game.rooms.W1N1.memory.remotes ?? [], "W1N2");
   });
 
-  it("remote 旗不让旁边的弱分房抢走，交给开得起外矿的家", () => {
-    // E27S36 贴着新分房时，只按距离会让 RCL1 接旗——分房造不出远程矿工，主家又没名单
+  it("remote 旗不让旁边的弱分房抢走，交给更高等级的家", () => {
+    // E27S36 贴着新分房时，只按距离会让 RCL1 接旗——分房孵化窄，主家更适合养挖运/预定
     Game.rooms.W1N0 = ownedRoom("W1N0", 1) as Room;
     Memory.rooms.W1N2 = {
       scouted: 1,
@@ -314,8 +314,8 @@ describe("旗子指令", () => {
 
     runFlagDirectives();
 
-    assert.include(Game.rooms.W1N1.memory.remotes ?? [], "W1N2", "RCL4 的主家承接");
-    assert.isUndefined(Game.rooms.W1N0.memory.remotes, "RCL1 分房不能开外矿");
+    assert.include(Game.rooms.W1N1.memory.remotes ?? [], "W1N2", "高等级主家承接");
+    assert.isUndefined(Game.rooms.W1N0.memory.remotes, "同场有更高等级家时分房不抢旗");
     assert.equal(Memory.rooms.W1N2.home, "W1N1");
   });
 
@@ -393,6 +393,99 @@ describe("孵化队列", () => {
     assert.isAbove(slots.find(slot => slot.role === next)?.deficit ?? 0, 0);
     // 没有 hauler 时应急 harvester 配额会亮，它排在 miner 前面
     assert.equal(next, "harvester");
+  });
+
+  it("scout 和外矿挖运排在建造/升级前面", () => {
+    const scout = SPAWN_PRIORITY.indexOf("scout");
+    const remoteMiner = SPAWN_PRIORITY.indexOf("remoteMiner");
+    const remoteHauler = SPAWN_PRIORITY.indexOf("remoteHauler");
+    const builder = SPAWN_PRIORITY.indexOf("builder");
+    const upgrader = SPAWN_PRIORITY.indexOf("upgrader");
+
+    assert.isBelow(scout, remoteMiner);
+    assert.isBelow(remoteMiner, remoteHauler);
+    assert.isBelow(remoteHauler, builder);
+    assert.isBelow(scout, upgrader);
+  });
+});
+
+describe("早期外矿分阶段配额", () => {
+  class FakePosition {
+    public constructor(public x: number, public y: number, public roomName: string) {}
+  }
+
+  let saved: { Game: unknown; Memory: unknown; RoomPosition: unknown };
+
+  beforeEach(() => {
+    installGameConstants();
+    const context = global as unknown as typeof saved;
+    saved = { Game: context.Game, Memory: context.Memory, RoomPosition: context.RoomPosition };
+    context.Game = {
+      creeps: {},
+      time: 800000,
+      rooms: {},
+      map: { describeExits: () => ({ 1: "W1N2" }), getRoomLinearDistance: () => 1 }
+    };
+    context.Memory = {
+      rooms: {
+        W1N2: {
+          scouted: 1,
+          sources: { sRemote: { x: 10, y: 10 } },
+          home: "W1N1"
+        }
+      }
+    };
+    context.RoomPosition = FakePosition;
+  });
+
+  afterEach(() => {
+    Object.assign(global, saved);
+  });
+
+  function roomAt(level: number): Room {
+    return {
+      name: "W1N1",
+      controller: { level, my: true, ticksToDowngrade: 30000 },
+      energyAvailable: level >= 2 ? 550 : 300,
+      energyCapacityAvailable: level >= 2 ? 550 : 300,
+      memory: { remotes: ["W1N2"], anchor: { x: 25, y: 25 } },
+      find: (type: number) => {
+        if (type === FIND_SOURCES) return [{ id: "s1" }, { id: "s2" }];
+        return [];
+      }
+    } as unknown as Room;
+  }
+
+  function quotaOf(target: Room, role: CreepRole): number {
+    return spawnQueue(target).slots.find(slot => slot.role === role)?.quota ?? 0;
+  }
+
+  it("RCL1 有外矿时用跨房 harvester，不派 remoteMiner / reserver", () => {
+    const home = roomAt(1);
+    (global as unknown as { Game: { rooms: Record<string, Room> } }).Game.rooms.W1N1 = home;
+
+    assert.isAbove(quotaOf(home, "harvester"), 1, "应急 1 + 外矿路程定编");
+    assert.equal(quotaOf(home, "remoteMiner"), 0);
+    assert.equal(quotaOf(home, "remoteHauler"), 0);
+    assert.equal(quotaOf(home, "reserver"), 0);
+  });
+
+  it("RCL2 有外矿时走 remoteMiner + remoteHauler，仍不预定", () => {
+    const home = roomAt(2);
+    (global as unknown as { Game: { rooms: Record<string, Room> } }).Game.rooms.W1N1 = home;
+    Memory.rooms.W1N2.pathLen = 40;
+
+    assert.equal(quotaOf(home, "remoteMiner"), 1);
+    assert.isAbove(quotaOf(home, "remoteHauler"), 0, "不等矿边桶：掉落蒸发正是最该有人去拉的时候");
+    assert.equal(quotaOf(home, "reserver"), 0);
+  });
+
+  it("RCL3 才给预定员名额", () => {
+    const home = roomAt(3);
+    (global as unknown as { Game: { rooms: Record<string, Room> } }).Game.rooms.W1N1 = home;
+
+    assert.equal(quotaOf(home, "remoteMiner"), 1);
+    assert.equal(quotaOf(home, "reserver"), 1);
   });
 });
 
@@ -493,11 +586,11 @@ describe("产出被吃光时收编制", () => {
     assert.equal(quotaOf(critical, "builder"), 3);
   });
 
-  it("核心建筑建完才放开升级工", () => {
+  it("核心建筑建完后按收入养升级工，不再写死四人", () => {
     const idle = room(1000, 90, 0);
 
-    // 编制想要 4 个，但站位只有 3 个，多出来的站在外围干瞪眼
-    assert.equal(quotaOf(idle, "upgrader"), 3);
+    // 双矿 20/tick、800 预算约 7 WORK：floor(20*0.55/7)=1，站位 3 不再是瓶颈
+    assert.equal(quotaOf(idle, "upgrader"), 1);
     assert.equal(quotaOf(idle, "builder"), 0);
   });
 
@@ -505,7 +598,55 @@ describe("产出被吃光时收编制", () => {
     // 粮仓空可能只是升级工换班的间隙，矿边还堆着两千说明运力才是瓶颈
     const backlogged = room(0, 2000, 0);
 
-    assert.equal(quotaOf(backlogged, "upgrader"), 3);
+    assert.equal(quotaOf(backlogged, "upgrader"), 1, "不饿时仍按收入封顶");
     assert.equal(quotaOf(backlogged, "builder"), 0);
+  });
+
+  it("storage 里有余量时不算吃紧，别误压到饥饿编制", () => {
+    const buffered = room(100, 90, 0);
+    (buffered as { storage?: { store: { energy: number } } }).storage = { store: { energy: 5000 } };
+
+    // 5000 够证明产线没塌（不进 isStarved），但未到盈余线，人数仍按常态份额
+    assert.equal(quotaOf(buffered, "upgrader"), 1, "仓里有货说明产线没塌");
+  });
+
+  it("storage 囤得多时提高升级份额", () => {
+    const fat = room(1000, 90, 0);
+    (fat as { storage?: { store: { energy: number } } }).storage = { store: { energy: 15000 } };
+
+    // floor(20*0.85/7)=2
+    assert.equal(quotaOf(fat, "upgrader"), 2);
+  });
+
+  it("外矿预定后收入上去，升级工可以多养一个", () => {
+    const idle = room(1000, 90, 0);
+    idle.memory.remotes = ["W1N2"];
+    (Memory.rooms as Record<string, RoomMemory>).W1N2 = {
+      home: idle.name,
+      sources: { s: { x: 10, y: 10 } },
+      reserveEnds: Game.time + 2000
+    };
+
+    // 双矿 20 + 预定外矿 10 = 30，floor(30*0.55/7)=2
+    assert.equal(quotaOf(idle, "upgrader"), 2);
+  });
+});
+
+describe("升级工收入缩放", () => {
+  it("常态份额大约一半收入，双矿养不起两个七 WORK", () => {
+    assert.equal(upgradersAffordable(20, 7, false), 1);
+  });
+
+  it("盈余份额可以提高到两人", () => {
+    assert.equal(upgradersAffordable(20, 7, true), 2);
+  });
+
+  it("WORK 更大时同样收入养更少人", () => {
+    assert.equal(upgradersAffordable(20, 8, false), 1);
+    assert.equal(upgradersAffordable(30, 8, false), 2);
+  });
+
+  it("至少留一个，避免收入抖动掉到零", () => {
+    assert.equal(upgradersAffordable(5, 8, false), 1);
   });
 });

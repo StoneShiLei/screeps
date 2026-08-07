@@ -65,12 +65,18 @@ describe("分房体型", () => {
     assert.equal(countPart(body, "move"), 1);
   });
 
-  it("拓荒者要自己挖自己建，三种部件等量", () => {
+  it("拓荒者满载平地也能 1t/格：MOVE 要盖住 WORK+满载 CARRY", () => {
     const body = bodyFor("pioneer", 800);
 
-    assert.equal(countPart(body, "work"), 4);
-    assert.equal(countPart(body, "carry"), 4);
-    assert.equal(countPart(body, "move"), 4);
+    // 一组 W+C+M+M=250；800 买三组。空 CARRY 不计重，但满载后非 MOVE=6、MOVE=6
+    assert.equal(countPart(body, "work"), 3);
+    assert.equal(countPart(body, "carry"), 3);
+    assert.equal(countPart(body, "move"), 6);
+    assert.isAtLeast(
+      countPart(body, "move"),
+      countPart(body, "work") + countPart(body, "carry"),
+      "满载平原每非 MOVE 产 2 疲劳，每个 MOVE 消 2，必须 MOVE ≥ WORK+CARRY"
+    );
   });
 
   it("搬运工只有 CARRY 和 MOVE，一比一", () => {
@@ -198,6 +204,20 @@ describe("分房阶段", () => {
     assert.equal(pioneerQuota(room), 2, "按 grow 留守人数继续扶，不依赖 expansion 记录");
     assert.deepEqual(expansionAssignment(room), { targetRoom: "W1N2" });
     assert.include(expansionStatus(room) ?? "", "扶持中");
+  });
+
+  it("外矿不再占用拓荒者名额：容器归矿工、路归运输队顺手修", () => {
+    // 曾经这里会给外矿路队留一格配额，结果是"专人跨房修容器"和"路队目标粘滞"
+    // 两套 bug。现在拓荒者只干分房/扶持
+    const room = home({ remotes: ["W1N0"] });
+    room.find = (type: number) => {
+      if (type === FIND_MY_SPAWNS) return [{}];
+      if (type === FIND_MY_CONSTRUCTION_SITES) return [{ structureType: "extension" }];
+      return [];
+    };
+
+    assert.equal(pioneerQuota(room), 0);
+    assert.deepEqual(expansionAssignment(room), {});
   });
 
   it("弱房建起塔之后经济扶持也停", () => {
@@ -485,11 +505,24 @@ describe("搬空前人的仓库", () => {
     assert.equal(looterQuota(home({ loot: "W1N2" })), 2);
   });
 
-  it("有了 storage 才放开到满编", () => {
+  it("storage 空着仍压两人：仓还没站稳不抢孵化", () => {
     Memory.rooms.W1N2.lootLeft = 84_000;
-    const withStorage = { ...home({ loot: "W1N2" }), storage: {} } as unknown as Room;
+    const empty = {
+      ...home({ loot: "W1N2" }),
+      storage: { store: { energy: 0 } }
+    } as unknown as Room;
 
-    assert.equal(looterQuota(withStorage), 4, "一百万容量的坑，运多少都吃得下");
+    assert.equal(looterQuota(empty), 2);
+  });
+
+  it("storage 攒够垫底才放开到满编", () => {
+    Memory.rooms.W1N2.lootLeft = 84_000;
+    const withStorage = {
+      ...home({ loot: "W1N2" }),
+      storage: { store: { energy: 5000 } }
+    } as unknown as Room;
+
+    assert.equal(looterQuota(withStorage), 4, "仓里有底了再多派人多赚");
   });
 
   it("只剩零头就不专门派人了", () => {
