@@ -1,21 +1,64 @@
 /**
  * harvester：把能量从 source 搬进 spawn 和 extension。
  *
- * 升级 controller 的活已经交给 upgrader，这里只保留一个兜底：
- * 所有储能建筑都满了的时候顺手升级一下，免得 creep 干站着把寿命耗光。
+ * 常态只在搬运工断档时救急（本房自挖自送）。RCL1 外矿也用它：绑 targetRoom /
+ * sourceId 后跨房挖、运回本房；spawn/extension 满了就升级，免得堵在身上。
  */
 
-import { gatherEnergy, refreshEnergyState } from "utils/energy";
-import { travelTo } from "../movement/move";
+import { commuteOrFlee } from "../managers/remote";
+import { commuteTo, travelTo } from "../movement/move";
+import { announce } from "../utils/logger";
+import { gatherEnergy, refreshEnergyState } from "../utils/energy";
 
 export function runHarvester(creep: Creep): void {
   refreshEnergyState(creep, "运输");
+
+  if (creep.memory.targetRoom && creep.memory.sourceId) {
+    runRemoteHarvester(creep);
+    return;
+  }
 
   if (creep.memory.working) {
     deliverEnergy(creep);
   } else {
     gatherEnergy(creep);
   }
+}
+
+/**
+ * 跨房自挖自送：空载去外矿，满载回本房；本房投递口满了就升级。
+ */
+function runRemoteHarvester(creep: Creep): void {
+  const targetRoom = creep.memory.targetRoom;
+  if (!targetRoom) return;
+
+  if (creep.memory.working) {
+    if (creep.room.name !== creep.memory.room) {
+      announce(creep, "回送");
+      commuteTo(creep, creep.memory.room);
+      return;
+    }
+
+    deliverEnergy(creep);
+    return;
+  }
+
+  // 遇袭冷却：空载直接撤，别往雷区里闯
+  if (commuteOrFlee(creep, targetRoom)) return;
+
+  const source = Game.getObjectById(creep.memory.sourceId as Id<Source>);
+  if (!source) {
+    delete creep.memory.sourceId;
+    return;
+  }
+
+  if (!creep.pos.isNearTo(source)) {
+    travelTo(creep, source, { visualizePathStyle: { stroke: "#ffaa00" } });
+    return;
+  }
+
+  announce(creep, "挖");
+  creep.harvest(source);
 }
 
 function deliverEnergy(creep: Creep): void {
@@ -38,8 +81,9 @@ function deliverEnergy(creep: Creep): void {
 
 function dumpIntoController(creep: Creep): void {
   const controller = creep.room.controller;
-  if (!controller) return;
+  if (!controller?.my) return;
 
+  announce(creep, "升");
   if (creep.upgradeController(controller) === ERR_NOT_IN_RANGE) {
     travelTo(creep, controller, { range: 3, visualizePathStyle: { stroke: "#88ff88" } });
   }

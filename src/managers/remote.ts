@@ -11,20 +11,16 @@
 
 import { CLAIM_LIFETIME, partsWeight, spawnHeadroom } from "./spawnLoad";
 import { announce, log } from "../utils/logger";
-import { bodyFor, maxRepeatFor } from "../utils/body";
+import { bodyFor } from "../utils/body";
 import { commuteTo, travelTo } from "../movement/move";
-import { defendersNeeded, hostilesIn, intrudersIn } from "../roles/defender";
+import { clearableCoreIn, defendersNeeded, hostilesIn, intrudersIn } from "../roles/defender";
 import {
   REMOTE_ROADS_REV,
   maintainRemoteSites,
   planRemoteMiningSpots,
-  planRemoteRoads,
-  unbuiltRemoteContainers,
-  unbuiltRemoteRoads,
-  wornContainer,
-  wornRoad
+  planRemoteRoads
 } from "../planner/remoteRoads";
-import { ROAD_MIN_LEVEL } from "../planner/roomPlanner";
+import { ROAD_MIN_LEVEL, hasCoreBuildPending } from "../planner/roomPlanner";
 import { costMatrixFor } from "../movement/costMatrix";
 import { isRetiring } from "./relief";
 import { planBreach } from "../movement/breach";
@@ -33,12 +29,11 @@ import { worldRange } from "../utils/distance";
 /**
  * 几级开始开外矿。
  *
- * 3 级能开，但这一级其实偏早：能量上限只有 800，运输队造不大；storage 要
- * 4 级才有，运回来的能量只能塞进 spawn、extension 和控制器容器，很容易堵。
- * 之所以还是放在 3 级，是因为再早连一个像样的矿工都派不出去。
+ * RCL1 就能开：用跨房 harvester 自挖自送，不预定、不派 remoteMiner。
+ * RCL2 起换成矿工+运输；预定仍看 RESERVE_MIN_LEVEL。
+ * 旗子认领也看这个门槛。
  */
-/** 几级才能开外矿；旗子认领也看这个，别让 RCL1 分房把名单抢走 */
-export const REMOTE_MIN_LEVEL = 3;
+export const REMOTE_MIN_LEVEL = 1;
 
 /**
  * 打不过才撤人时的冷却。
@@ -53,6 +48,14 @@ const MAX_REMOTE_GUARDIANS = 3;
 
 /** 侦察结果的保鲜期。归属会变，但这是以天计的事，不用盯着 */
 const SCOUT_REFRESH = 20000;
+
+/**
+ * Invader Core 房间的回访间隔。
+ *
+ * lesser core 会反复出现；已经踢出名单的也要尽快再探一眼，确认是 0 级可清
+ * 还是据点该放弃，以及拆完后能不能重新开矿。
+ */
+const CORE_SCOUT_REFRESH = 500;
 
 /** 有人驻守的外矿隔多少 tick 复查一次归属，别每 tick 都去数建筑 */
 const WATCH_INTERVAL = 100;
@@ -110,6 +113,12 @@ const TRIP_OVERHEAD = 10;
 /** 一个外矿最多派几个运输队，再多是路上排队 */
 const MAX_HAULERS_PER_REMOTE = 3;
 
+/** RCL1 跨房 harvester 每源上限，避免早期孵化被外矿吃光 */
+const MAX_HARVESTERS_PER_SOURCE = 4;
+
+/** 一个 WORK 每 tick 挖多少能量（HARVEST_POWER） */
+const HARVEST_PER_WORK = 2;
+
 export interface RemoteSource {
   roomName: string;
   sourceId: string;
@@ -151,6 +160,11 @@ function isMinable(memory: RoomMemory): boolean {
 /** 名单上正被别人预定、该派预定员去磨的房间 */
 function isContesting(roomName: string): boolean {
   return Memory.rooms[roomName]?.unusable === "reserved";
+}
+
+/** 0 级 lesser core：留名单、派 guardian 清，清完重新可采 */
+function isClearableCore(memory: RoomMemory): boolean {
+  return memory.unusable === "core" && memory.coreLevel === 0;
 }
 
 function collectActive(home: Room): RemoteSource[] {
@@ -444,40 +458,6 @@ function isRetiringReserver(creep: Creep, home: Room): boolean {
 }
 
 /**
- * 需要派人去建/修外矿基础设施（矿边容器和路）的房间。
- *
- * 交给拓荒者而不是给运输队挂 WORK，是一笔算得清的账。维护本身极便宜：一格路每
- * 1000 tick 掉 100 血，一个 WORK 每 tick 修 100 血只花 1 能量，整条四十格的路线
- * 一千 tick 的衰减也就四十能量。而给运输队挂 WORK 很贵——800 预算下它现在是
- * 8C8M（400 容量），加一个 WORK 还得补一个 MOVE 才能维持满载全速，预算凑不出来，
- * 只能退成 1W 6C 7M，运力直接少四分之一。用 25% 的运力换每千 tick 40 能量的维护，
- * 账是反的。
- *
- * 建造更不适合顺手做：一格路 300 点进度，一个 WORK 每 tick 推 5 点，站着 60 tick
- * 才铺完一格，而那是运输队半个往返。容器同理。
- *
- * 拓荒者本来就会跨房间通勤、就地找能量、建造和修理；能量直接吃矿工产出，等于
- * 外矿自己出钱修自己的路和容器。容器不看老家等级，路仍按 ROAD_MIN_LEVEL 解锁。
- */
-export function roadCrewTarget(home: Room): string | undefined {
-  const canRoad = (home.controller?.level ?? 0) >= ROAD_MIN_LEVEL;
-
-  for (const roomName of [...new Set(activeRemoteSources(home).map(entry => entry.roomName))]) {
-    if (isRemotePaused(roomName)) continue;
-
-    // 没视野时看不出铺没铺、磨没磨，等有人过去再说。矿工和运输队一直在那边跑，
-    // 视野不会缺很久
-    const room = Game.rooms[roomName];
-    if (!room) continue;
-
-    if (unbuiltRemoteContainers(room) > 0 || wornContainer(room)) return roomName;
-    if (canRoad && (unbuiltRemoteRoads(room) > 0 || wornRoad(room))) return roomName;
-  }
-
-  return undefined;
-}
-
-/**
  * 外矿矿位被别人的 creep 占着、需要派协防兵清场的房间。
  *
  * 典型场面：源旁边只有一格能站（E27S36），邻居的矿工钉在我们的容器落点上，
@@ -541,6 +521,27 @@ export function remoteDefenseTarget(home: Room): { target: string; count: number
   return best;
 }
 
+/**
+ * 外矿名单里有 0 级 Invader Core、该派 guardian 去拆的房间。
+ *
+ * 没视野也照派：人到了才有视野，watchRemote / survey 会更新状态。
+ * 有视野却找不到 0 级 core 时跳过（可能刚拆完，等 survey 清 unusable）。
+ */
+export function remoteCoreTarget(home: Room): string | undefined {
+  for (const roomName of home.memory.remotes ?? []) {
+    const memory = Memory.rooms[roomName];
+    if (!memory || memory.home !== home.name) continue;
+    if (!isClearableCore(memory)) continue;
+
+    const room = Game.rooms[roomName];
+    if (room && !clearableCoreIn(room)) continue;
+
+    return roomName;
+  }
+
+  return undefined;
+}
+
 /** 这一格上有没有外人 */
 function hostileOnSpot(room: Room, x: number, y: number): boolean {
   if (typeof room.lookForAt === "function") {
@@ -564,23 +565,123 @@ export function unassignedRemoteSource(home: Room): RemoteSource | undefined {
 }
 
 /**
- * 一个外矿要几个运输队。
+ * RCL1 跨房 harvester：缺口最大的外矿源。
  *
- * 算的是"产出追不追得上运力"：源每 tick 产 5 点，运输队跑一趟的时间里源已经
- * 又攒了 5×往返 点，这些必须一趟拉完，否则地上的存货只会越堆越多。
+ * 一路程可多人共源（自挖自送），按编制差额挑，而不是一源一人。
+ */
+export function unassignedRemoteHarvesterSource(home: Room): RemoteSource | undefined {
+  const { capacity, work } = harvesterCarryWork(home);
+  if (capacity <= 0 || work <= 0) return undefined;
+
+  const assigned = new Map<string, number>();
+  for (const creep of Object.values(Game.creeps)) {
+    if (
+      creep.memory.role === "harvester" &&
+      creep.memory.room === home.name &&
+      creep.memory.targetRoom &&
+      creep.memory.sourceId
+    ) {
+      const id = creep.memory.sourceId;
+      assigned.set(id, (assigned.get(id) ?? 0) + 1);
+    }
+  }
+
+  let best: RemoteSource | undefined;
+  let bestDeficit = 0;
+
+  for (const entry of activeRemoteSources(home)) {
+    const need = harvestersForRemoteSource(
+      remoteDistance(home, entry.roomName),
+      capacity,
+      work,
+      NEUTRAL_SOURCE_RATE
+    );
+    const deficit = need - (assigned.get(entry.sourceId) ?? 0);
+    if (deficit > bestDeficit) {
+      bestDeficit = deficit;
+      best = entry;
+    }
+  }
+
+  return best;
+}
+
+/**
+ * 一个外矿要多少 CARRY 部件才追得上产出。
  *
- * 拆成纯函数是因为这里最容易拍脑袋定人数，而距离和体型一变结论就变。
+ * 这才是运力的本体：源每 tick 产 rate 点，运输队一个往返要 2d 个 tick，
+ * 那段时间里攒下的 rate×2d 点必须一趟拉完，所以 CARRY = rate×往返 ÷ 50。
+ * 换算成人数只是最后一步除法——同样的需求，RCL2 的 4C 小车要九个，
+ * RCL4 的 16C 大车三个就够，人数变了不代表公式变了。
+ */
+export function carryPartsForRemote(sources: number, distance: number, rate: number): number {
+  if (sources <= 0 || rate <= 0 || !Number.isFinite(distance)) return 0;
+
+  const roundTrip = distance * 2 + TRIP_OVERHEAD;
+  return Math.ceil((sources * rate * roundTrip) / CARRY_CAPACITY);
+}
+
+/**
+ * 一个外矿要几个运输队：CARRY 需求除以单车能带的 CARRY。
+ *
+ * 向上取整而不是四舍五入。两边的代价不对称：多派一个运输队只是多摊一份孵化费，
+ * 而运力差一点点会让矿工的产出一直堆在地上，堆到蒸发速度追上缺口才停——
+ * 五十二格的外矿按四舍五入只派一个，运力却只有需求的七成，三成产出白扔。
  */
 export function haulersForRemote(sources: number, distance: number, capacity: number, rate: number): number {
   if (sources <= 0 || capacity <= 0) return 0;
 
-  const roundTrip = distance * 2 + TRIP_OVERHEAD;
-  const perTrip = sources * rate * roundTrip;
+  const needed = carryPartsForRemote(sources, distance, rate);
+  const perCreep = capacity / CARRY_CAPACITY;
 
-  // 向上取整而不是四舍五入。两边的代价不对称：多派一个运输队只是多摊一份孵化费，
-  // 而运力差一点点会让矿工的产出一直堆在地上，堆到蒸发速度追上缺口才停——
-  // 五十二格的外矿按四舍五入只派一个，运力却只有需求的七成，三成产出白扔。
-  return Math.min(MAX_HAULERS_PER_REMOTE * sources, Math.max(1, Math.ceil(perTrip / capacity)));
+  return Math.min(MAX_HAULERS_PER_REMOTE * sources, Math.max(1, Math.ceil(needed / perCreep)));
+}
+
+/**
+ * RCL1 自挖自送：一个外矿源要几个 harvester。
+ *
+ * 瓶颈是通勤——背有限 CARRY 往返时源还在涨。周期 = 往返 + 挖满一趟的时间，
+ * 人数按"周期内产出 / 单趟运力"向上取整。
+ */
+export function harvestersForRemoteSource(
+  distance: number,
+  capacity: number,
+  workParts: number,
+  rate: number
+): number {
+  if (capacity <= 0 || workParts <= 0 || rate <= 0) return 0;
+  if (!Number.isFinite(distance)) return 0;
+
+  const roundTrip = distance * 2 + TRIP_OVERHEAD;
+  const fillTicks = Math.ceil(capacity / (workParts * HARVEST_PER_WORK));
+  const cycle = roundTrip + fillTicks;
+
+  return Math.min(MAX_HARVESTERS_PER_SOURCE, Math.max(1, Math.ceil((rate * cycle) / capacity)));
+}
+
+/** 本房当前预算下，跨房 harvester 编制合计 */
+export function remoteHarvestersNeeded(home: Room): number {
+  const { capacity, work } = harvesterCarryWork(home);
+  if (capacity <= 0 || work <= 0) return 0;
+
+  let total = 0;
+  for (const entry of activeRemoteSources(home)) {
+    total += harvestersForRemoteSource(
+      remoteDistance(home, entry.roomName),
+      capacity,
+      work,
+      NEUTRAL_SOURCE_RATE
+    );
+  }
+
+  return total;
+}
+
+function harvesterCarryWork(home: Room): { capacity: number; work: number } {
+  const body = bodyFor("harvester", home.energyCapacityAvailable);
+  const capacity = body.filter(part => part === CARRY).length * CARRY_CAPACITY;
+  const work = body.filter(part => part === WORK).length;
+  return { capacity, work };
 }
 
 /**
@@ -592,12 +693,11 @@ export function haulersForRemote(sources: number, distance: number, capacity: nu
 /**
  * 开这个外矿要占多少孵化预算，单位是部件当量。
  *
- * 三笔账：每个源一个矿工、按距离算出来的运输队、按住控制器的预定员。预定员只有
- * 两个部件却折算成五个当量，因为它 600 tick 就得换一个人。
+ * RCL1：按跨房 harvester 路程定编算。
+ * RCL2+：每个源一个矿工、按距离算运输队；达到预定等级后再加上预定员当量。
  *
- * 按"预定之后"的稳态算，而不是按刚开那几百 tick 算。新房间还没预定，此刻的产能
- * 只有一半、运输队也只要一半，照那个数放行的话，等预定员一到位运力需求翻倍，
- * 预算已经超了——而外矿一旦开起来就不会因为超编再收回去。
+ * 预定侧按"预定之后"的稳态算：新房间还没预定时产能只有一半，照那个数放行的话，
+ * 等预定员一到位运力需求翻倍，预算已经超了——而外矿一旦开起来就不会因为超编再收回。
  */
 export function spawnCostOf(home: Room, roomName: string): number {
   const sources = Object.keys(Memory.rooms[roomName]?.sources ?? {}).length;
@@ -605,10 +705,20 @@ export function spawnCostOf(home: Room, roomName: string): number {
   if (sources === 0 || !Number.isFinite(distance)) return Infinity;
 
   const budget = home.energyCapacityAvailable;
-  const reserved = isReserved(roomName) || (home.controller?.level ?? 0) >= RESERVE_MIN_LEVEL;
+  const level = home.controller?.level ?? 0;
+
+  if (level < 2) {
+    const body = bodyFor("harvester", budget);
+    const capacity = body.filter(part => part === CARRY).length * CARRY_CAPACITY;
+    const work = body.filter(part => part === WORK).length;
+    const perSource = harvestersForRemoteSource(distance, capacity, work, NEUTRAL_SOURCE_RATE);
+    return partsWeight(sources * perSource * body.length);
+  }
+
+  const reserved = isReserved(roomName) || level >= RESERVE_MIN_LEVEL;
 
   const minerParts = bodyFor("remoteMiner", budget, reserved ? RESERVED_MINER_WORK : undefined).length;
-  const haulerParts = bodyFor("remoteHauler", budget).length;
+  const haulerParts = bodyFor("remoteHauler", budget, undefined, level).length;
   const rate = reserved ? RESERVED_SOURCE_RATE : NEUTRAL_SOURCE_RATE;
   const haulers = haulersForRemote(sources, distance, haulerCapacity(home), rate);
 
@@ -617,12 +727,29 @@ export function spawnCostOf(home: Room, roomName: string): number {
   return partsWeight(sources * minerParts + haulers * haulerParts) + reserver;
 }
 
+/**
+ * 现在造得出来的运输队能带多少能量。
+ *
+ * 直接照体型数 CARRY，不按预算估算：RCL4 起模板会固定塞一个 WORK 和配套 MOVE
+ * 去顺路修路，按"预算除以 100"估就会高估一格容量，人数跟着算少。
+ */
 function haulerCapacity(home: Room): number {
-  const pairs = Math.min(Math.floor(home.energyCapacityAvailable / 100), maxRepeatFor("remoteHauler"));
-  return pairs * CARRY_CAPACITY;
+  const body = bodyFor("remoteHauler", home.energyCapacityAvailable, undefined, home.controller?.level);
+  return body.filter(part => part === CARRY).length * CARRY_CAPACITY;
 }
 
-/** 全部外矿加起来要几个运输队 */
+/**
+ * 全部外矿加起来要几个运输队。
+ *
+ * 不看矿边有没有容器：运输队本来就会捡地上的散货（物流表里掉落优先级更高），
+ * 而没有容器时地上的存货每 tick 按 ceil(数量/1000) 蒸发——那正是最需要有人
+ * 去拉的时候。曾经在这里卡一道"桶齐才开运"，结果是矿工照挖、一个运输队不派，
+ * 三千能量堆在地上慢慢烂掉，那个外矿净亏。
+ *
+ * 本房核心建筑还没齐时帽到"每源一人"：RCL2 的 4C 小车按公式能算出九个，
+ * 全养上就把 extension 工地饿到永远铺不完——而 RCL 上不去，运输体型也大不了。
+ * 先运一点、先铺底座，等 extension 齐了再按公式放满。
+ */
 export function remoteHaulersNeeded(home: Room): number {
   const capacity = haulerCapacity(home);
   const perRoom: Record<string, number> = {};
@@ -632,10 +759,16 @@ export function remoteHaulersNeeded(home: Room): number {
   }
 
   let total = 0;
+  let sources = 0;
   for (const [roomName, count] of Object.entries(perRoom)) {
+    sources += count;
     // 预定过的房间产能翻倍，运力也得跟着翻，否则矿工挖出来的一半烂在地上
     const rate = isReserved(roomName) ? RESERVED_SOURCE_RATE : NEUTRAL_SOURCE_RATE;
     total += haulersForRemote(count, remoteDistance(home, roomName), capacity, rate);
+  }
+
+  if (sources > 0 && hasCoreBuildPending(home)) {
+    return Math.min(total, sources);
   }
 
   return total;
@@ -654,6 +787,7 @@ export function runRemoteManager(home: Room): void {
   const remotes = (home.memory.remotes ??= []);
 
   dropUnusable(home, remotes);
+  reclaimClearableCores(home, remotes);
 
   const candidate = bestCandidate(home, remotes);
   if (!candidate) return;
@@ -676,7 +810,8 @@ export function runRemoteManager(home: Room): void {
  *
  * 旗子 / 控制台手动加外矿也走这里，免得只改了名单却忘了规划。手动那条路越过
  * 自动挑选的评分，指定一个具体房间——被别人预定的也会收进来（派预定员去抢），
- * 被别人占领 / keeper / core 那种硬打不过的仍由调用方拒绝。
+ * 0 级 Invader Core 也会收进来（派 guardian 拆），被别人占领 / keeper /
+ * 据点那种硬打不过的仍由调用方拒绝。
  *
  * 若这个房间原先记在别的家的名单里，先从那边摘掉，避免弱分房抢走旗子之后
  * 主家再也看不见、两家 memory.home 互相覆盖。
@@ -704,9 +839,9 @@ export function enableRemote(home: Room, target: string): void {
 /**
  * 把已经不能采、也不值得抢的房间踢出名单。
  *
- * 别人占领、驻进 invader core、没有源、Source Keeper 房间——这些踢出去腾名额。
- * 被别人预定的留下：那是抢预定的目标，预定员会去 attackController 磨，磨归零
- * 再反手预定，采得着之后自然回到正常外矿流程。
+ * 别人占领、1+ 级据点、没有源、Source Keeper 房间——这些踢出去腾名额。
+ * 被别人预定的留下：那是抢预定的目标，预定员会去 attackController 磨。
+ * 0 级 Invader Core 也留下：派 guardian 拆掉就能重新采。
  *
  * 自己占下来也要踢——而且这一条只能在这里判。定期复查（surveyRoom）只对
  * 没有归属的房间跑，房间一旦归了自己，主循环就不再把它当外矿看，那份记录
@@ -719,14 +854,36 @@ function dropUnusable(home: Room, remotes: string[]): void {
     const memory = Memory.rooms[roomName];
     const mine = Game.rooms[roomName]?.controller?.my === true;
 
-    // 采得着，或者正在被别人预定（留着抢）——都留在名单里
-    const keep = !mine && memory && (isMinable(memory) || memory.unusable === "reserved");
+    // 采得着、抢预定、或清 0 级 core——都留在名单里
+    const keep =
+      !mine && memory && (isMinable(memory) || memory.unusable === "reserved" || isClearableCore(memory));
     if (keep) continue;
 
     const reason = mine ? "已经占下来了，它自己就是个家" : (memory?.unusable ?? "没有记录");
     log.info("外矿", `${home.name} 放弃外矿 ${roomName}：${reason}`);
     delete Memory.rooms[roomName]?.home;
     remotes.splice(i, 1);
+  }
+}
+
+/**
+ * 邻房侦察到 0 级 lesser core 时自动加进名单，好派 guardian 清后复矿。
+ *
+ * 据点（coreLevel ≥ 1）不加。已经在名单里的不动。
+ */
+function reclaimClearableCores(home: Room, remotes: string[]): void {
+  const exits = Game.map.describeExits(home.name);
+  if (!exits) return;
+
+  for (const roomName of Object.values(exits)) {
+    if (!roomName || remotes.includes(roomName)) continue;
+
+    const memory = Memory.rooms[roomName];
+    if (!memory?.scouted || !isClearableCore(memory)) continue;
+    if (!memory.sources || Object.keys(memory.sources).length === 0) continue;
+
+    enableRemote(home, roomName);
+    log.info("外矿", `${home.name} 收回收 0 级 Invader Core 的外矿 ${roomName}，派协防兵清核`);
   }
 }
 
@@ -770,13 +927,17 @@ function bestCandidate(home: Room, remotes: string[]): string | undefined {
  * 取平均而不是取最近：运输队是每个源都要跑到的，只看最近那个会低估分散型
  * 房间的成本——两个源分别在房间两头时，一趟只顺得上一边。
  *
- * 用直线距离而不是真寻路：这个数只用来排序和估人数，误差十几格不改变结论，
- * 而一次跨房寻路要几千 ops。
+ * 优先用 planRemoteRoads 存下的真实路程：那趟跨房寻路本来就要跑，长度白拿。
+ * 直线距离只在还没规划过（比如刚侦察完、正在评分的候选房）时兜底——它系统性
+ * 偏小，源躲在邻房远端时能差十几格，而运力定编对这个数很敏感。
  *
- * 但直线距离得自己算：RoomPosition.getRangeTo 碰上别的房间只会返回 Infinity，
+ * 直线距离得自己算：RoomPosition.getRangeTo 碰上别的房间只会返回 Infinity，
  * 那样每个候选房间都会撞上距离上限被剔掉，外矿一个也开不起来。
  */
 function remoteDistance(home: Room, roomName: string): number {
+  const known = Memory.rooms[roomName]?.pathLen;
+  if (known !== undefined && known > 0) return known;
+
   const anchor = home.memory.anchor;
   const sources = Object.values(Memory.rooms[roomName]?.sources ?? {});
   if (!anchor || sources.length === 0) return Infinity;
@@ -804,18 +965,31 @@ export function surveyRoom(room: Room): void {
     sources[source.id] = { x: source.pos.x, y: source.pos.y };
   }
 
+  const cores = room
+    .find(FIND_HOSTILE_STRUCTURES)
+    .filter((structure): structure is StructureInvaderCore => structure.structureType === STRUCTURE_INVADER_CORE);
+  const prevCore = memory.coreLevel;
+  if (cores.length > 0) {
+    memory.coreLevel = Math.max(...cores.map(core => core.level));
+  } else {
+    delete memory.coreLevel;
+  }
+
   const verdict = judge(room, sources);
   // 驻守的房间会反复复查，结论没变就别吭声，否则日志里全是同一行
-  const changed = memory.scouted === undefined || memory.unusable !== verdict;
+  const changed =
+    memory.scouted === undefined || memory.unusable !== verdict || prevCore !== memory.coreLevel;
 
   memory.sources = sources;
   memory.scouted = Game.time;
   memory.unusable = verdict;
 
   if (changed) {
+    const coreBit =
+      verdict === "core" && memory.coreLevel !== undefined ? ` L${memory.coreLevel}` : "";
     log.info(
       "侦察",
-      `${room.name} 能量源 ${Object.keys(sources).length} 个，${verdict ? `不可用（${verdict}）` : "可用"}`
+      `${room.name} 能量源 ${Object.keys(sources).length} 个，${verdict ? `不可用（${verdict}${coreBit}）` : "可用"}`
     );
   }
 }
@@ -1021,7 +1195,14 @@ export function nextScoutTarget(home: Room): string | undefined {
 
     // 已经判死的房间不用回访，归属变了也轮不到我们捡漏
     if (memory.unusable === "keeper" || memory.unusable === "none") continue;
-    if (Game.time - memory.scouted > SCOUT_REFRESH) return roomName;
+
+    // 旧数据只写了 unusable=core、没记等级：立刻去探，好区分可清 / 据点
+    if (memory.unusable === "core" && memory.coreLevel === undefined) return roomName;
+
+    // core 房更勤回访：确认等级、拆完复矿、或据点仍在就别空等两万 tick
+    const refresh =
+      memory.unusable === "core" || memory.coreLevel !== undefined ? CORE_SCOUT_REFRESH : SCOUT_REFRESH;
+    if (Game.time - memory.scouted > refresh) return roomName;
   }
 
   return undefined;

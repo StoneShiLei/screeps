@@ -7,15 +7,22 @@
  * 3 个 WORK 每 tick 挖 6 点已经超过再生速度，多带的 WORK 只会让它更早把源
  * 挖空然后闲着，白付一份孵化费和通勤费。
  *
- * 二是不自己建容器。外矿的容器和路统一交给拓荒者：它有 CARRY、会就地找能量，
- * 本来就要去铺路。矿工只管站到落点上挖——没有 CARRY，挖出来的能量掉在脚下，
- * 容器会自动收进去；容器还没建好就先堆在地上，运输队照样捡。
+ * 二是矿边容器归它自己管——建也是它、修也是它。它已经站在落点上，已经有 WORK，
+ * 而且 3 个 WORK 每 tick 挖 6 点、源只回 5 点，本身就有余力；无主房间的容器每
+ * 100 tick 掉 5000 血，一个 WORK 每 tick 修 100 血只花 1 能量，摊下来半点能量/tick。
+ * 为这点活专派一个跨房拓荒者，等于把已经付过的钱再付一遍。
+ *
+ * 预算不够配 CARRY 时（450 以下，加了 CARRY 就只剩 2 个 WORK）它退回纯挖：
+ * 能量掉在脚下，有容器就自动收进去，没有就堆在地上等运输队捡。
  */
 
 import { RESERVED_MINER_WORK, activeRemoteSources, commuteOrFlee, isReserved } from "../managers/remote";
 import { announce, log } from "../utils/logger";
 import { holdPosition } from "../movement/traffic";
 import { travelTo } from "../movement/move";
+
+/** 容器掉血到这个比例以下就顺手修，和本房 miner 同一口径 */
+const REPAIR_THRESHOLD = 0.75;
 
 export function runRemoteMiner(creep: Creep): void {
   const assignment = resolveAssignment(creep);
@@ -56,8 +63,40 @@ export function runRemoteMiner(creep: Creep): void {
 
   // 到位就钉住：外矿的位置同样是产出，被路过的运输队挤开一格就少挖一个 tick
   holdPosition(creep);
-  announce(creep, "挖");
+
+  // 挖和建/修可以同一 tick 做完：harvest 和 build 各占一次意图，互不冲突。
+  // 先挖再花，口袋里的能量才是这一 tick 刚到手的
   creep.harvest(source);
+  if (!tendContainer(creep)) announce(creep, "挖");
+}
+
+/**
+ * 建或修脚下的矿边容器，做了事就返回 true。
+ *
+ * 建容器要 5000 能量，等于这个源一千 tick 的全部产出，所以工地什么时候拍
+ * 由 maintainRemoteSites 按等级把关；矿工只负责"有工地就推进度"。
+ */
+function tendContainer(creep: Creep): boolean {
+  if (creep.store[RESOURCE_ENERGY] === 0) return false;
+
+  const here = creep.pos.lookFor(LOOK_STRUCTURES);
+  const container = here.find(
+    (structure): structure is StructureContainer => structure.structureType === STRUCTURE_CONTAINER
+  );
+
+  if (container) {
+    if (container.hits >= container.hitsMax * REPAIR_THRESHOLD) return false;
+    announce(creep, "补桶");
+    creep.repair(container);
+    return true;
+  }
+
+  const site = creep.pos.lookFor(LOOK_CONSTRUCTION_SITES)[0];
+  if (!site || site.structureType !== STRUCTURE_CONTAINER) return false;
+
+  announce(creep, "建桶");
+  creep.build(site);
+  return true;
 }
 
 /**

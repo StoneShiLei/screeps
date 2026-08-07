@@ -13,7 +13,7 @@ description: Query live Screeps room/Memory state via repo tools/ scripts after 
 - API 固定 `shard3`（见 `tools/api.ts` 的 `SHARD`）
 - 在仓库根目录执行；命令可能需网络权限
 
-常用房间（以当前 probe 为准，可随局势改）：基地 `E28S36`，殖民/邻房 `E28S35`。
+常用房间（以当前 probe 为准，可随局势改）：基地 `E52S29`；外矿候选 `E52S28`（双源）、`E53S29`（单源）。
 
 ## 怎么选工具
 

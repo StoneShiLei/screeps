@@ -114,6 +114,20 @@ export function intrudersIn(room: Room): Creep[] {
 }
 
 /**
+ * 房间里可清的 0 级 Invader Core（扇区 lesser core）。
+ *
+ * 1+ 级是据点，不在这里碰——那是成建制攻坚，不是外矿 guardian 的活。
+ */
+export function clearableCoreIn(room: Room): StructureInvaderCore | undefined {
+  for (const structure of room.find(FIND_HOSTILE_STRUCTURES)) {
+    if (structure.structureType === STRUCTURE_INVADER_CORE && structure.level === 0) {
+      return structure;
+    }
+  }
+  return undefined;
+}
+
+/**
  * 打赢这批敌人要派几个兵。
  *
  * 不再一个敌人配一个兵——对方的 creep 往往比我们的小，一个满编 defender 的火力
@@ -221,19 +235,35 @@ function fight(creep: Creep): void {
   // 优先打带武器的，剩下的经济单位随手清理——先解决打得死人的那些
   const threat = threatOf(creep.room);
   const hostiles = threat.armed.length > 0 ? threat.armed : threat.all;
-  const target = creep.pos.findClosestByRange(hostiles);
+  let target: Creep | Structure | null | undefined = creep.pos.findClosestByRange(hostiles);
 
   // 追击距离的限制只在有塔的房间才成立：那条绳子拴的是"别离开火力掩护"。
   // 没有塔的房间（刚占下的分房就是）没有掩护可言，追出去二十格和站在原地
   // 一样安全，而不追就等于白派了一个兵——它会在门口一直站到老死。
   const tooFar = threat.towered && target && creep.pos.getRangeTo(target) > CHASE_RANGE;
+  if (tooFar) target = undefined;
 
-  if (!target || tooFar) {
+  // 没 creep 可打时拆 0 级 Invader Core（外矿被 lesser core 预定时的主活）
+  if (!target) {
+    const core = clearableCoreIn(creep.room);
+    if (core) {
+      // 未展开前攻击无效，贴边等着，别当成清场回家
+      if (core.ticksToDeploy > 0) {
+        announce(creep, "等核");
+        travelTo(creep, core.pos, { range: 1, visualizePathStyle: { stroke: "#ff4444" } });
+        return;
+      }
+      target = core;
+    }
+  }
+
+  if (!target) {
     rally(creep);
     return;
   }
 
-  announce(creep, "迎战");
+  const isCore = "structureType" in target && target.structureType === STRUCTURE_INVADER_CORE;
+  announce(creep, isCore ? "拆核" : "迎战");
 
   // 先打再走：攻击不看这一 tick 有没有移动，够得着就先削一刀
   if (creep.attack(target) === ERR_NOT_IN_RANGE) {
@@ -255,7 +285,8 @@ function dispatch(creep: Creep): boolean {
   if (!target) return false;
 
   if (creep.room.name === target) {
-    if (intrudersIn(creep.room).length > 0) return false;
+    // 有敌对 creep 或可拆的 0 级 core 都算还有活，别急着转驻守
+    if (intrudersIn(creep.room).length > 0 || clearableCoreIn(creep.room)) return false;
 
     log.info("防御", `${target} 已清场，${creep.name} 转为驻守`);
     delete creep.memory.targetRoom;

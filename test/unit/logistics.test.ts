@@ -16,6 +16,7 @@ import { gatherEnergy } from "../../src/utils/energy";
 import { haulersForBacklog } from "../../src/managers/spawnManager";
 import { installGameConstants } from "./mock";
 import { filterHaulerSupplies, runHauler } from "../../src/roles/hauler";
+import { runRemoteHauler } from "../../src/roles/remoteHauler";
 import { runUpgrader } from "../../src/roles/upgrader";
 import { urgentDemand, usableEnergy } from "../../src/managers/panel";
 
@@ -746,6 +747,40 @@ describe("静态升级工的认领", () => {
     assert.equal(creep.memory.station?.x, station.x, "有 hauler 时原地等粮，不放弃站位");
     assert.isAbove(creep.memory.idleTicks ?? 0, 50, "还在计数，只是不因此出门");
   });
+
+  it("建造优先时身上有能量仍灌控制器，不干站着", () => {
+    const controller = { my: true, level: 3, ticksToDowngrade: 15000 };
+    const room = {
+      name: "W1N3",
+      controller,
+      memory: {},
+      find: (type: number) => {
+        if (type === FIND_MY_CONSTRUCTION_SITES) {
+          return [{ structureType: STRUCTURE_EXTENSION }];
+        }
+        return [];
+      }
+    } as unknown as Room;
+
+    let upgraded = 0;
+    const creep = {
+      name: "upgrader_3",
+      memory: { role: "upgrader", room: room.name, working: true, station: { x: 10, y: 10 } },
+      room,
+      pos: { x: 25, y: 25, roomName: room.name, getRangeTo: () => 1 },
+      store: { energy: 50, getFreeCapacity: () => 0 },
+      say: () => 0,
+      upgradeController: () => {
+        upgraded++;
+        return OK;
+      }
+    } as unknown as Creep;
+
+    runUpgrader(creep);
+
+    assert.isAtLeast(upgraded, 1, "建造期也不该浪费身上的能量");
+    assert.isUndefined(creep.memory.station, "等建时让出站位");
+  });
 });
 
 describe("搬运工认领粘性", () => {
@@ -1150,6 +1185,221 @@ describe("搬运工兜底投喂", () => {
     runHauler(hauler);
 
     assert.deepEqual(transferred, ["spawn1"], "房间还急着孵化时，投喂不能抢运力");
+  });
+
+  it("remoteHauler 回家后建筑已满就投喂 builder，别满载干站", () => {
+    const spawn = { id: "spawn1", structureType: "spawn", pos: { x: 20, y: 20 }, store: store(300, 300) };
+    const roomName = `W${Math.floor(Math.random() * 1e6)}N5`;
+    const room = {
+      name: roomName,
+      memory: { anchor: { x: 25, y: 25 } },
+      find: (type: number) => {
+        if (type === FIND_MY_STRUCTURES) return [spawn];
+        if (type === FIND_STRUCTURES) return [spawn];
+        if (type === FIND_MY_CREEPS) return [];
+        if (type === FIND_MY_CONSTRUCTION_SITES) return [{ id: "site1" }];
+        if (type === FIND_DROPPED_RESOURCES) return [];
+        if (type === FIND_TOMBSTONES) return [];
+        if (type === FIND_RUINS) return [];
+        return [];
+      }
+    } as unknown as Room;
+
+    const builder = {
+      name: "builder_1",
+      memory: { role: "builder", room: roomName },
+      room,
+      pos: { x: 5, y: 5, roomName },
+      store: store(0, 250)
+    };
+
+    const transferred: string[] = [];
+    const hauler = {
+      name: "remoteHauler_1",
+      memory: { role: "remoteHauler", room: roomName, working: true, targetRoom: "W1N2" },
+      room,
+      pos: {
+        x: 25,
+        y: 25,
+        roomName,
+        findClosestByRange: (_type: number, opts: { filter: (c: unknown) => boolean }) =>
+          [builder].find(opts.filter) ?? null
+      },
+      store: store(150, 150),
+      say: () => 0,
+      transfer: (target: { name?: string; id?: string }) => {
+        transferred.push(target.name ?? target.id ?? "?");
+        return 0;
+      }
+    } as unknown as Creep;
+
+    (global as unknown as { Game: { rooms: Record<string, Room>; getObjectById: (id: string) => unknown; creeps: Record<string, unknown> } }).Game.rooms =
+      { [roomName]: room };
+    (global as unknown as { Game: { getObjectById: (id: string) => unknown } }).Game.getObjectById = id =>
+      (id === "spawn1" ? { ...spawn, room } : null);
+    (global as unknown as { Game: { creeps: Record<string, unknown> } }).Game.creeps = {
+      remoteHauler_1: hauler,
+      builder_1: builder
+    };
+
+    runRemoteHauler(hauler);
+
+    assert.deepEqual(transferred, ["builder_1"], "无处卸建筑时能量应转给建造工");
+  });
+});
+
+describe("搬运工卸完半载先补满", () => {
+  let saved: { Game: unknown; Memory: unknown };
+
+  beforeEach(() => {
+    installGameConstants();
+    const context = global as unknown as typeof saved;
+    saved = { Game: context.Game, Memory: context.Memory };
+    context.Game = { creeps: {}, rooms: {}, time: Math.floor(Math.random() * 1e6), getObjectById: () => null };
+    context.Memory = { rooms: {}, creeps: {} };
+  });
+
+  afterEach(() => {
+    Object.assign(global, saved);
+  });
+
+  function store(energy: number, capacity: number): unknown {
+    return {
+      energy,
+      getFreeCapacity: (resource?: string) => (resource === "energy" || resource === undefined ? capacity - energy : 0),
+      getCapacity: () => capacity
+    };
+  }
+
+  it("上一趟卸完还有空位且矿边有货时先补货，不半载接下一个 extension", () => {
+    const spot = { x: 10, y: 10 };
+    const sourceContainer = {
+      id: "矿边桶",
+      structureType: "container",
+      pos: spot,
+      store: store(800, 2000)
+    };
+    const spawn = {
+      id: "spawn1",
+      structureType: "spawn",
+      pos: { x: 20, y: 20 },
+      store: store(200, 300)
+    };
+
+    const roomName = `W${Math.floor(Math.random() * 1e6)}N7`;
+    const room = {
+      name: roomName,
+      memory: { miningSpots: { s1: spot }, anchor: { x: 25, y: 25 } },
+      find: (type: number) => {
+        if (type === FIND_MY_STRUCTURES) return [spawn];
+        if (type === FIND_STRUCTURES) return [spawn, sourceContainer];
+        if (type === FIND_MY_CREEPS) return [];
+        if (type === FIND_MY_CONSTRUCTION_SITES) return [];
+        if (type === FIND_DROPPED_RESOURCES) return [];
+        if (type === FIND_TOMBSTONES) return [];
+        if (type === FIND_RUINS) return [];
+        return [];
+      }
+    } as unknown as Room;
+
+    const transferred: string[] = [];
+    const withdrew: string[] = [];
+    const hauler = {
+      name: "hauler_1",
+      // 刚卸完：没 deliverTo、半载、working 还是 true——旧逻辑会直接去填 spawn
+      memory: { role: "hauler", room: roomName, working: true },
+      room,
+      pos: {
+        x: 19,
+        y: 20,
+        roomName,
+        getRangeTo: () => 1,
+        findClosestByPath: () => null,
+        findClosestByRange: () => null
+      },
+      store: store(100, 200),
+      say: () => 0,
+      transfer: (target: { id?: string }) => {
+        transferred.push(target.id ?? "?");
+        return 0;
+      },
+      withdraw: (target: { id?: string }) => {
+        withdrew.push(target.id ?? "?");
+        return OK;
+      }
+    } as unknown as Creep;
+
+    const objects: Record<string, unknown> = {
+      spawn1: { ...spawn, room },
+      矿边桶: { ...sourceContainer, room }
+    };
+    (global as unknown as { Game: { rooms: Record<string, Room>; getObjectById: (id: string) => unknown; creeps: Record<string, unknown> } }).Game.rooms =
+      { [roomName]: room };
+    (global as unknown as { Game: { getObjectById: (id: string) => unknown } }).Game.getObjectById = id => objects[id] ?? null;
+    (global as unknown as { Game: { creeps: Record<string, unknown> } }).Game.creeps = { hauler_1: hauler };
+
+    runHauler(hauler);
+
+    assert.isFalse(hauler.memory.working, "应切回取货");
+    assert.deepEqual(transferred, [], "半载时不该先去填建筑");
+    assert.deepEqual(withdrew, ["矿边桶"], "有空位应先去矿边补满");
+  });
+
+  it("没货可补时半载仍去送，别干站着", () => {
+    const spawn = {
+      id: "spawn1",
+      structureType: "spawn",
+      pos: { x: 20, y: 20 },
+      store: store(200, 300)
+    };
+
+    const roomName = `W${Math.floor(Math.random() * 1e6)}N8`;
+    const room = {
+      name: roomName,
+      memory: { anchor: { x: 25, y: 25 } },
+      find: (type: number) => {
+        if (type === FIND_MY_STRUCTURES) return [spawn];
+        if (type === FIND_STRUCTURES) return [spawn];
+        if (type === FIND_MY_CREEPS) return [];
+        if (type === FIND_MY_CONSTRUCTION_SITES) return [];
+        if (type === FIND_DROPPED_RESOURCES) return [];
+        if (type === FIND_TOMBSTONES) return [];
+        if (type === FIND_RUINS) return [];
+        return [];
+      }
+    } as unknown as Room;
+
+    const transferred: string[] = [];
+    const hauler = {
+      name: "hauler_1",
+      memory: { role: "hauler", room: roomName, working: true },
+      room,
+      pos: {
+        x: 19,
+        y: 20,
+        roomName,
+        getRangeTo: () => 1,
+        findClosestByPath: () => null,
+        findClosestByRange: () => null
+      },
+      store: store(100, 200),
+      say: () => 0,
+      transfer: (target: { id?: string }) => {
+        transferred.push(target.id ?? "?");
+        return 0;
+      }
+    } as unknown as Creep;
+
+    (global as unknown as { Game: { rooms: Record<string, Room>; getObjectById: (id: string) => unknown; creeps: Record<string, unknown> } }).Game.rooms =
+      { [roomName]: room };
+    (global as unknown as { Game: { getObjectById: (id: string) => unknown } }).Game.getObjectById = id =>
+      (id === "spawn1" ? { ...spawn, room } : null);
+    (global as unknown as { Game: { creeps: Record<string, unknown> } }).Game.creeps = { hauler_1: hauler };
+
+    runHauler(hauler);
+
+    assert.isTrue(hauler.memory.working, "没货可补就继续送");
+    assert.deepEqual(transferred, ["spawn1"]);
   });
 });
 

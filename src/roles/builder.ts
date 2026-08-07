@@ -44,8 +44,8 @@ function buildOrFallBack(creep: Creep): void {
  * 选工地时优先接着上一个继续建，避免一群 builder 在几个工地之间来回横跳，
  * 每个都建一半谁也完不成。
  *
- * 需要重新挑的时候按建造顺序挑，同一档里才比远近。光挑最近的会让能量源旁的
- * 容器一直排在队尾——而那个容器一天不建好，矿工就一天上不了岗。
+ * 需要重新挑的时候按建造顺序挑，同一档里才比远近。光挑最近的会打乱
+ * extension 优先于矿边容器的顺序。
  */
 function findTarget(creep: Creep): ConstructionSite | null {
   const remembered = creep.memory.siteId ? Game.getObjectById(creep.memory.siteId) : null;

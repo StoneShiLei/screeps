@@ -13,9 +13,10 @@ description: Debug Screeps energy logistics, hauler delivery, builder starvation
 |------|------|
 | builder 站着、说让位 / 无货源 | 缓冲桶是否可取；`gatherEnergy` 让位是否把矿边也锁死 |
 | hauler 满载说待命 | `demands` 是否为空；建造期粮仓是否仍挂需求 |
+| remoteHauler 满载说无处卸 | spawn/ext 满且无 storage/缓冲桶需求；应回落投喂 builder/upgrader/pioneer |
 | hauler 来回晃 | 认领是否被自己的在途量扣没（`logisticsOf(room, creep)`） |
 | 容器卡在某个数附近 | 需求门槛与供给留底是否叠在同一阈值 |
-| 升级粮仓有货但没人用 | 建造优先是否停了 upgrader，且粮仓是否被排除在供给外 |
+| 升级粮仓有货但没人用 | 建造优先：有核心工地时 upgrader 喊「等建」、不从粮仓取；身上有能量仍应灌控制器 |
 
 线上核对用 `screeps-live-state`：容器存量、工地、creep 的 `working`/能量、`energyAvailable`。
 
@@ -52,6 +53,10 @@ description: Debug Screeps energy logistics, hauler delivery, builder starvation
 ### 5. 认领抖动
 
 `claimDemand` / `claimSupply` 必须用 `logisticsOf(room, creep)` 忽略自己；粘旧目标看 `demandStillOpen` / `supplyStillOpen`，不要要求目标仍在被自己扣空后的表里。
+
+### 6. 半载接下单
+
+hauler 卸完一个目标后若身上还有能量、CARRY 没满，且房间里仍有可取供给：应切回取货补满，再接下一个需求。`working && !deliverTo && freeCapacity > 0` 时别直接 `claimDemand`。没货可补时半载继续送（旧兜底）。
 
 ## 建造 vs 升级（策略）
 

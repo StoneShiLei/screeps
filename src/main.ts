@@ -5,6 +5,7 @@ import { runRemoteManager, watchRemote } from "managers/remote";
 import { runSafeMode } from "managers/safeMode";
 import { ErrorMapper } from "utils/ErrorMapper";
 import { announce } from "utils/logger";
+import { announceDeploy } from "utils/deploy";
 import { drawRoomPanel } from "managers/panel";
 import { installCommands } from "cli/commands";
 import { runBuilder } from "roles/builder";
@@ -38,6 +39,9 @@ installCommands();
 export const loop = ErrorMapper.wrapLoop(() => {
   // 搓像素会取消同 tick 全部意图，只能在开头判定并整 tick 跳过
   if (tryGeneratePixel()) return;
+
+  // 新包加载后控制台打一次变更提示
+  announceDeploy();
 
   cleanupCreepMemory();
   cleanupRoomMemory();

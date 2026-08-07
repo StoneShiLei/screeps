@@ -51,6 +51,10 @@ export function runHauler(creep: Creep): void {
  *
  * 换状态时把上一段的任务清掉，否则物流系统会以为它还在赶去那个目标，
  * 白白替它占着份额，别的 hauler 就不去了。
+ *
+ * 上一趟卸完、身上还有货但没装满时：若房间里仍有可取的货，先补满再接下单。
+ * 否则半载跑去填下一个 extension，等于把空着的 CARRY 白运一趟。
+ * 正在认领的送货单不打断（deliverTo 还在就继续送）。
  */
 function updateState(creep: Creep): void {
   if (creep.memory.working && creep.store[RESOURCE_ENERGY] === 0) {
@@ -61,6 +65,15 @@ function updateState(creep: Creep): void {
     creep.memory.working = true;
     delete creep.memory.withdrawFrom;
     announce(creep, "送货");
+  } else if (
+    creep.memory.working &&
+    !creep.memory.deliverTo &&
+    creep.store[RESOURCE_ENERGY] > 0 &&
+    creep.store.getFreeCapacity(RESOURCE_ENERGY) > 0 &&
+    availableSupplies(creep).length > 0
+  ) {
+    creep.memory.working = false;
+    announce(creep, "补货");
   }
 }
 

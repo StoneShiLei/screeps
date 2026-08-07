@@ -16,16 +16,19 @@ description: Debug Screeps remote mining, reservation contesting, reservers, rem
 
 ## 状态机（简）
 
-| `memory.unusable` | 含义 | 采集 | 预定员 |
-|-------------------|------|------|--------|
+| `memory.unusable` | 含义 | 采集 | 预定员 / 协防 |
+|-------------------|------|------|----------------|
 | 无 | 可采 | `remoteMiner` / `remoteHauler` | 维持己方预定 |
 | `"reserved"` | 别人预定 | 不采 | `attackController` 抢 |
-| `"owned"` / keeper / core / none | 放弃 | 不采 | 不加名单 |
+| `"core"` + `coreLevel===0` | 0 级 Invader Core | 不采 | `guardian` 拆核；拆完复矿 |
+| `"owned"` / keeper / 据点 core / none | 放弃 | 不采 | 不加名单 |
 
 - `isMinable` ≈ `!unusable`
 - `isContesting` ≈ `unusable === "reserved"`
 - `reserveTargets` = 可采房 ∪ 抢预定房（遇袭冷却中的抢预定房除外）
-- `dropUnusable`：**保留** `"reserved"` 在名单里（要抢）
+- `dropUnusable`：**保留** `"reserved"` 与可清的 0 级 `"core"`；1+ 级据点踢掉
+- `remoteCoreTarget` / `reclaimClearableCores`：邻房侦到 L0 core 自动收回名单并派 guardian
+- scout 对 `unusable===core` 且无 `coreLevel` 的房间立刻回访
 
 关键：`src/managers/remote.ts`、`flags.ts` 的 `remote`、`cli` 的 `remote.add`。
 
@@ -36,24 +39,33 @@ description: Debug Screeps remote mining, reservation contesting, reservers, rem
 - **单 CLAIM**：按人寿/退役补
 - **双 CLAIM**：按 `reserveLeft` 与 `reserveLeadTime`（通勤 + 孵化 + ~200 排队余量）补；余量告急时退休也要提前接班，否则等死再孵会在通勤尽头踩空
 - 抢预定房：仍按退役/在场人数补（对方 timer 靠打掉）
-- SPAWN：`reserver` 排在 pioneer/upgrader/scout 前，避免建造高峰把预定挤断
+- SPAWN：`scout` → `remoteMiner` → `remoteHauler` → `reserver` 紧跟本房闭环，再才是 guardian/builder/…；避免早期探不动、外矿/预定被建造升级挤断
 
 角色里：别人预定 → `attackController`；中立/己方 → `reserveController`。
 
-## 开矿规模
+## 开矿规模与阶段
 
 **不设**房间数 / 源数硬上限（已删 `REMOTE_LIMIT` / `REMOTE_SOURCE_LIMIT`）。  
-自动加房闸：`REMOTE_MIN_LEVEL`、路程 `MAX_REMOTE_DISTANCE`、以及 `spawnHeadroom`（孵化排得下才加）。名单上可采的源全开。
+自动加房闸：`REMOTE_MIN_LEVEL`（**1**）、路程 `MAX_REMOTE_DISTANCE`、以及 `spawnHeadroom`（孵化排得下才加）。候选必须已 `scouted`。名单上可采的源全开。
+
+| 本房 RCL | 外矿编制 | 预定 |
+|----------|----------|------|
+| 1 | 跨房 `harvester`（按路程×运力定编，自挖自送；spawn/ext 满则升级） | 不派 |
+| 2 | `remoteMiner` + `remoteHauler`（**不等容器**，掉落照捡；核心未齐时运输帽到每源 1 人） | 不派 |
+| 3+ | 同上 + `reserver`；RCL3 起拍矿边容器工地 | 维持/抢预定 |
+
+侦察兵**无 RCL 门槛**；`SPAWN_PRIORITY` 里 scout / remoteMiner / remoteHauler 紧跟本房闭环。本房核心未齐时 `pickSpawn` 把 builder 插到 remoteHauler 前。
 
 ## 基建（路 / 容器）
 
-外矿路与容器靠 **pioneer 路队**（`roadCrewTarget`），不是 remoteMiner。  
-`pioneerQuota` 要把路队与 `colonyBoost` **相加**，不能 colonyBoost 一亮就 return 掉路队。分派见 `expansionAssignment`。本房核心未齐时路队也会被建造优先冻结（见 `screeps-logistics` / expansion）。
+- **容器**：RCL3+ 由 `maintainRemoteSites` 拍工地，`remoteMiner`（预算≥500 时带 1 CARRY）自建自修。无 pioneer 路队。
+- **路**：RCL4+（`ROAD_MIN_LEVEL`）拍工地；同档起 `remoteHauler` 体型带 1 WORK，顺路 build/repair，不改道。
+- 运力定编用 `Memory.rooms[remote].pathLen`（`planRemoteRoads` 缓存的真实路程），不是切比雪夫直线。
 
 ## 旗子 / CLI
 
 - `remote` 旗 / `remote.add`：接受 reserved（抢预定）；拒绝 owned 等
-- 选 home：`nearestRemoteHome`（RCL ≥ `REMOTE_MIN_LEVEL`），别派弱房挂外矿
+- 选 home：`nearestRemoteHome`（RCL ≥ `REMOTE_MIN_LEVEL`，同场优先高等级，同级再挑近的）
 - 未侦察完可留旗重试
 
 ## 矿位被邻居占着 / 外矿遇袭
@@ -64,12 +76,12 @@ description: Debug Screeps remote mining, reservation contesting, reservers, rem
 有武装敌人时先算战力（`remoteDefenseForce` / `defendersNeeded`）：
 - **打得过**（所需 ≤ `MAX_REMOTE_GUARDIANS`）：清掉/`不写` `raided`，`remoteDefenseTarget` 派 guardian；闲置协防兵由 `ensureGuardianDuty` 重新挂 `targetRoom`；工人贴身仍 `evade`
 - **打不过**：才记 `raided`、冷却 1500、停采撤人
-- 面板外矿行显示 `(抗)`（有视野且武装在场、未冷却）
+- 面板外矿行显示 `(抗)`（有视野且武装在场、未冷却）、`(核)`（清 0 级 Invader Core）
 
 ## 排查
 
 1. 加了 reserved 房却在等 remoteMiner？应先看 reserver / `reserveTargets`，不是矿工。
 2. 预定着却 harvest 失败？符合规则，改抢预定或换房。
-3. 没人修外矿路？查 pioneer 是否被 boost/建造闸吃光。
+3. 没人修外矿路？RCL4 前不铺；之后看 remoteHauler 是否带 WORK、是否路过破损路。容器看 remoteMiner 有没有 CARRY。
 4. 补员过密或断档？查是否该走双 CLAIM 的 `reserveLeft` 逻辑。
 5. 矿工站源边却挖不到？看落点上有没有外人 → 应出 guardian。

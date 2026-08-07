@@ -24,7 +24,6 @@ import { defendersNeeded, hostilesIn } from "../roles/defender";
 import { bodyFor } from "../utils/body";
 import { hasCoreBuildPending } from "../planner/roomPlanner";
 import { log } from "../utils/logger";
-import { roadCrewTarget } from "./remote";
 import { worldRange } from "../utils/distance";
 
 /**
@@ -79,14 +78,6 @@ const PIONEERS_GROW_SURGE = 3;
  * 自然永远不触发加派——它自己都刚够温饱，谈不上接济别人。
  */
 const SURGE_ENERGY = 20000;
-
-/**
- * 去外矿铺路的只派一个。
- *
- * 铺路是慢工，多派人也快不了多少：四十格的路线要几千能量，而那些能量得从当地
- * 矿工的产出里挤——派两个人只会把运输队该运走的那份分得更薄。
- */
-const ROAD_CREW = 1;
 
 /**
  * 增援分房最多派几个兵。
@@ -179,43 +170,34 @@ export function claimerQuota(home: Room): number {
  */
 export function pioneerQuota(home: Room): number {
   const stage = expansionStage(home);
-  // 外矿容器/路缺人时永远留缺口：本房核心建造或分房扶持可以冻结加派，
-  // 但不能把这一格也掐掉——矿工产出洒在地上蒸发，比主房晚几天齐 extension 更亏。
-  // 现场踩过：E27S36 已拍容器工地，本房有一个 extension 工地就把 pioneer 配额冻 0。
-  const roadGap = roadCrewGap(home);
 
   // 目标正在挨打就先别往里添拓荒者：安全优先，让 guardian（跨房协防）把场清干净
   // 再派工作单位。工作兵冲进交火区只是白送，还占着孵化预算把真正该出的协防挤后头。
   // 只压不裁——路上的人留着，清完场立刻恢复扶持。看不见目标（claim 阶段没视野）
-  // 就当安全，不然分房永远开不出来。外矿路队不进火场，缺口照留。
+  // 就当安全，不然分房永远开不出来。
   if (stage === "build" || stage === "grow") {
     const target = expansionTarget(home);
     if (target && underAttack(target)) {
-      return affordable(home, ourPioneers(home).length + roadGap);
+      return affordable(home, ourPioneers(home).length);
     }
 
     // 本房核心建筑没铺完时：建 spawn 那一档仍放行（没 spawn 分房永远起不来），
     // grow / 扶持一律冻结——主房 extension 都没齐就去铺分房，两边都半吊子。
-    // 外矿路队仍放行：一格名额，就地吃外矿产出，不跟本房 builder 抢能量。
     if (stage === "grow" && hasCoreBuildPending(home)) {
-      return affordable(home, ourPioneers(home).length + roadGap);
+      return affordable(home, ourPioneers(home).length);
     }
 
     const cap = stage === "build" ? PIONEERS_SURGE : PIONEERS_GROW_SURGE;
     const base = stage === "build" ? PIONEERS_BUILDING : PIONEERS_GROWING;
-    return affordable(home, surge(home, base, cap) + roadGap);
+    return affordable(home, surge(home, base, cap));
   }
 
-  // 没有进行中的分房记录时，扶持弱房和给外矿铺路这两笔活可能同时存在，要相加，
-  // 不是二选一——旧写法 colonyBoost 一亮就 return，外矿的容器/路永远排不上人，
-  // 表现就是"开了外矿却没人去建 container"。两笔需求各自的分派见 expansionAssignment。
-  // 本房核心建筑没铺完：只冻扶持，外矿路队照派。
+  // 本房核心建筑没铺完时不加派：主房 extension 都没齐就去接济别人，两边都半吊子。
   if (hasCoreBuildPending(home)) {
-    return affordable(home, ourPioneers(home).length + roadGap);
+    return affordable(home, ourPioneers(home).length);
   }
 
-  let wanted = roadCrewTarget(home) ? ROAD_CREW : 0;
-  if (colonyBoostTarget(home)) wanted += surge(home, PIONEERS_GROWING, PIONEERS_GROW_SURGE);
+  const wanted = colonyBoostTarget(home) ? surge(home, PIONEERS_GROWING, PIONEERS_GROW_SURGE) : 0;
 
   return affordable(home, wanted);
 }
@@ -438,34 +420,18 @@ function needsColonyRelief(home: Room, room: Room): boolean {
 /**
  * 给拓荒者派活（占领者由 spawnManager 单独写死分房目标）。
  *
- * 外矿铺路名额永远优先于分房/扶持：矿边没有容器时产出洒地蒸发，比分房早几天
- * 齐 extension 更亏。
+ * 只剩分房和扶持弱房两件事。外矿的容器和路不在这里：容器归 remoteMiner 自己
+ * 建修（它就站在上面，本来就有 WORK 和余力），路归跑那条线的 remoteHauler
+ * 顺手修，都不需要一个跨房常驻的拓荒者。
  */
 export function expansionAssignment(home: Room): Partial<CreepMemory> {
-  const road = roadCrewTarget(home);
-  if (road && pioneersHeaded(road) < ROAD_CREW) return { targetRoom: road };
-
   const expansion = expansionTarget(home);
   if (expansion) return { targetRoom: expansion };
 
   const boost = colonyBoostTarget(home);
   if (boost) return { targetRoom: boost };
 
-  return road ? { targetRoom: road } : {};
-}
-
-/** 外矿路队还缺几个名额（已在路上的不算） */
-function roadCrewGap(home: Room): number {
-  const target = roadCrewTarget(home);
-  if (!target) return 0;
-  return Math.max(0, ROAD_CREW - pioneersHeaded(target));
-}
-
-/** 已经派去这个房间的拓荒者数量，用来在扶持和铺路之间分配名额 */
-function pioneersHeaded(target: string): number {
-  return Object.values(Game.creeps).filter(
-    creep => creep.memory.role === "pioneer" && creep.memory.targetRoom === target
-  ).length;
+  return {};
 }
 
 /** 占领者的孵化预算占用，给 CLI 估成本用 */

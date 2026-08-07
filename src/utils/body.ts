@@ -90,7 +90,15 @@ const TEMPLATES: Record<CreepRole, BodyTemplate> = {
   guardian: { pattern: ["attack", "move"], fixed: [], maxRepeat: 10, filler: "move" },
   scout: { pattern: ["move"], fixed: [], maxRepeat: 1 },
   // 外矿通勤无路；源 1500/300tick，3 WORK 够。
-  remoteMiner: { pattern: ["work", "move"], fixed: [], maxRepeat: 3 },
+  // 预算够就加 1 CARRY，让矿工自己建、自己修脚下的容器：它本来就站在那儿，
+  // 3 WORK 挖 6 点而源只回 5 点，本身就有余力，派第三个 creep 跨房来干是重复投资。
+  // 门槛卡在 500，是因为 450 预算下加了 CARRY 就只剩 2 个 WORK，挖不满源的再生。
+  remoteMiner: {
+    pattern: ["work", "move"],
+    fixed: [],
+    maxRepeat: 3,
+    bonus: { minBudget: 500, parts: ["carry"] }
+  },
   // 外矿路修好前大量平地，满载必须 1:1；修好后多 MOVE 也不亏多少。
   remoteHauler: { pattern: ["carry", "move"], fixed: [], maxRepeat: 12 },
   // CLAIM 始终算重；CLAIM:MOVE=1:1 即平原 1t。RCL3 一组、RCL4 两组。
@@ -116,6 +124,21 @@ const PLAIN_HOME: Partial<Record<CreepRole, BodyTemplate>> = {
   builder: { pattern: ["work", "carry", "move", "move"], fixed: [], maxRepeat: 5 }
 };
 
+/**
+ * RCL 到了铺外矿路那一档之后，运输队带上 1 个 WORK。
+ *
+ * 修路和建路都不占移动意图：creep 同一 tick 可以既 move 又 build/repair，所以
+ * 顺路干这点活不掉一格速度，只花掉车上那几点能量——而那正是路本身该花的钱。
+ * 代价只有少带的那一个 CARRY：1300 预算下从 12C 变成 11C，约 8%，而它换掉的是
+ * 一个常驻外矿的维修拓荒者（0.5 能量/tick）。
+ *
+ * 仍按无路 1:1 配（MOVE ≥ WORK + CARRY）：外矿路要几千能量才铺得完，在那之前
+ * 大半路程还是平地，按 2:1 造会一路 2 tick 一格。
+ */
+const ROAD_REMOTE: Partial<Record<CreepRole, BodyTemplate>> = {
+  remoteHauler: { pattern: ["carry", "move"], fixed: ["work", "move"], maxRepeat: 12 }
+};
+
 /** 输出顺序：受伤时身体从头开始掉，把 MOVE 放最后，残血了也还能挪回家 */
 const PART_ORDER: BodyPartConstant[] = ["tough", "work", "attack", "ranged_attack", "carry", "claim", "heal", "move"];
 
@@ -124,10 +147,10 @@ function costOf(parts: BodyPartConstant[]): number {
 }
 
 function templateFor(role: CreepRole, level?: number): BodyTemplate {
-  if (level !== undefined && level < HOME_ROAD_BODY_LEVEL) {
-    return PLAIN_HOME[role] ?? TEMPLATES[role];
-  }
-  return TEMPLATES[role];
+  if (level === undefined) return TEMPLATES[role];
+
+  if (level < HOME_ROAD_BODY_LEVEL) return PLAIN_HOME[role] ?? TEMPLATES[role];
+  return ROAD_REMOTE[role] ?? TEMPLATES[role];
 }
 
 /**

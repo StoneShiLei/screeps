@@ -49,29 +49,6 @@ function home(memory: Partial<RoomMemory> = {}, storedEnergy?: number): Room {
   } as unknown as Room;
 }
 
-/** 挂一个缺容器的外矿，让 roadCrewTarget 认出来 */
-function stubRemoteNeedingContainer(roomName: string): void {
-  // activeRemoteSources 按 tick 缓存，换个 tick 免得吃到前面用例的空名单
-  Game.time = (Game.time ?? 0) + 1;
-  const spot = { x: 10, y: 10 };
-  Memory.rooms[roomName] = {
-    home: "W1N1",
-    sources: { src1: spot },
-    miningSpots: { src1: spot }
-  };
-  Game.rooms[roomName] = {
-    name: roomName,
-    memory: Memory.rooms[roomName],
-    getPositionAt: (x: number, y: number) => ({
-      x,
-      y,
-      roomName,
-      lookFor: () => []
-    }),
-    find: () => []
-  } as unknown as Room;
-}
-
 describe("分房体型", () => {
   it("占领者一个 CLAIM 配两个 MOVE，赶路才是它全部的价值", () => {
     const body = bodyFor("claimer", 1300);
@@ -229,8 +206,9 @@ describe("分房阶段", () => {
     assert.include(expansionStatus(room) ?? "", "扶持中");
   });
 
-  it("本房核心建造进行中仍派外矿路队：容器工地不能跟着 extension 一起冻死", () => {
-    stubRemoteNeedingContainer("W1N0");
+  it("外矿不再占用拓荒者名额：容器归矿工、路归运输队顺手修", () => {
+    // 曾经这里会给外矿路队留一格配额，结果是"专人跨房修容器"和"路队目标粘滞"
+    // 两套 bug。现在拓荒者只干分房/扶持
     const room = home({ remotes: ["W1N0"] });
     room.find = (type: number) => {
       if (type === FIND_MY_SPAWNS) return [{}];
@@ -238,17 +216,8 @@ describe("分房阶段", () => {
       return [];
     };
 
-    assert.equal(pioneerQuota(room), 1, "路队一格名额，不跟本房 builder 抢能量");
-    assert.deepEqual(expansionAssignment(room), { targetRoom: "W1N0" });
-  });
-
-  it("分房 grow 时外矿路队仍优先占一个名额", () => {
-    stubRemoteNeedingContainer("W1N0");
-    Game.rooms.W1N2 = colony({ mine: true, spawns: 1 }) as Room;
-    const room = home({ expansion: { target: "W1N2", since: 1 }, remotes: ["W1N0"] });
-
-    assert.isAtLeast(pioneerQuota(room), 3, "grow 留守 2 + 路队 1");
-    assert.deepEqual(expansionAssignment(room), { targetRoom: "W1N0" }, "先填外矿容器再扶分房");
+    assert.equal(pioneerQuota(room), 0);
+    assert.deepEqual(expansionAssignment(room), {});
   });
 
   it("弱房建起塔之后经济扶持也停", () => {

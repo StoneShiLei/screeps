@@ -38,13 +38,23 @@ const MAX_ROOMS = 4;
 /** 同时最多开几个路面工地，让进度集中在一格上而不是摊在四十格里 */
 const MAX_ROAD_SITES = 2;
 
+/**
+ * 几级才开始在外矿拍容器工地。
+ *
+ * 一个容器 5000 能量，而它每 tick 只省下半点（掉落蒸发约 1 减去容器维护 0.5），
+ * 回本要一万 tick。RCL2 那 5000 能量拿去铺 extension 见效快得多，所以往后排。
+ */
+const REMOTE_CONTAINER_MIN_LEVEL = 3;
+
 /** 掉到这个比例以下才值得修。路有 5000 血，每 1000 tick 掉 100 */
 const REPAIR_THRESHOLD = 0.6;
 
 /**
  * 外矿路规划算法版本。涨一号就会在有视野时重算一遍，用来修跨房错位这类存量问题。
+ *
+ * 2：顺手记下真实路程（pathLen），运力定编不再用偏小的直线距离。
  */
-export const REMOTE_ROADS_REV = 1;
+export const REMOTE_ROADS_REV = 2;
 
 /**
  * 算出从这个外矿到基地的路，按房间分段存进各自的 Memory。
@@ -79,6 +89,8 @@ export function planRemoteRoads(home: Room, roomName: string): void {
     matrices.get(name)?.set(x, y, ROAD_COST);
   };
 
+  const lengths: number[] = [];
+
   for (const spot of Object.values(sources)) {
     const from = new RoomPosition(spot.x, spot.y, roomName);
     const result = PathFinder.search(from, entrances, {
@@ -93,6 +105,8 @@ export function planRemoteRoads(home: Room, roomName: string): void {
       log.warn("外矿", `${roomName} 到 ${home.name} 找不到路线，暂不铺路`);
       continue;
     }
+
+    lengths.push(result.path.length);
 
     for (const step of result.path) {
       remember(step.roomName, step.x, step.y);
@@ -109,6 +123,12 @@ export function planRemoteRoads(home: Room, roomName: string): void {
 
   const remoteMemory = (Memory.rooms[roomName] ??= {} as RoomMemory);
   remoteMemory.remoteRoadsRev = REMOTE_ROADS_REV;
+
+  // 这趟寻路走的正是运输队要走的路，长度存下来给运力定编用。直线距离在源躲在
+  // 邻房远端时会小十几格，照它定编就会一直少派人、产出堆在地上
+  if (lengths.length > 0) {
+    remoteMemory.pathLen = Math.round(lengths.reduce((sum, one) => sum + one, 0) / lengths.length);
+  }
 
   const total = [...byRoom.values()].reduce((sum, cells) => sum + cells.size, 0);
   log.info("外矿", `${roomName} → ${home.name} 的路线规划完毕，共 ${total} 格，跨 ${byRoom.size} 个房间`);
@@ -259,23 +279,18 @@ export function remoteRoadCells(roomName: string): Coord[] {
  * 在外矿房间里拍容器和路面工地。
  *
  * 房间不归我们，`runRoomPlanner` 不管它，所以这件事挂在"有视野时看一眼"那条
- * 路径上。容器不看老家等级——无主/预定房间里照样拍得下；路仍按老家等级解锁。
- * 容器优先占工地名额：矿边桶比路面更直接影响产出。
+ * 路径上。容器优先占工地名额：矿边桶比路面更直接影响产出。路按老家等级解锁。
+ *
+ * 容器要等到 REMOTE_CONTAINER_MIN_LEVEL：它要 5000 能量，等于这个源整整一千
+ * tick 的全部产出，而它省下来的只有掉落蒸发（每源约 1 能量/tick）减去容器自己
+ * 的维护（0.5），净赚半点，回本要一万 tick。RCL2 正缺能量铺 extension，
+ * 那笔投资排在后面；在那之前纯掉落挖矿，运输队照样把地上的搬走。
  */
 export function maintainRemoteSites(room: Room, level: number, minLevel: number): void {
   let open = room.find(FIND_MY_CONSTRUCTION_SITES).length;
 
-  for (const spot of Object.values(room.memory.miningSpots ?? {})) {
-    if (open >= MAX_ROAD_SITES) return;
-
-    const position = room.getPositionAt(spot.x, spot.y);
-    if (!position) continue;
-    if (position.lookFor(LOOK_STRUCTURES).some(structure => structure.structureType === STRUCTURE_CONTAINER)) {
-      continue;
-    }
-    if (position.lookFor(LOOK_CONSTRUCTION_SITES).length > 0) continue;
-
-    if (room.createConstructionSite(spot.x, spot.y, STRUCTURE_CONTAINER) === OK) open++;
+  if (level >= REMOTE_CONTAINER_MIN_LEVEL) {
+    open = planContainerSites(room, open);
   }
 
   if (level < minLevel) return;
@@ -290,6 +305,25 @@ export function maintainRemoteSites(room: Room, level: number, minLevel: number)
 
     if (room.createConstructionSite(cell.x, cell.y, STRUCTURE_ROAD) === OK) open++;
   }
+}
+
+function planContainerSites(room: Room, opened: number): number {
+  let open = opened;
+
+  for (const spot of Object.values(room.memory.miningSpots ?? {})) {
+    if (open >= MAX_ROAD_SITES) return open;
+
+    const position = room.getPositionAt(spot.x, spot.y);
+    if (!position) continue;
+    if (position.lookFor(LOOK_STRUCTURES).some(structure => structure.structureType === STRUCTURE_CONTAINER)) {
+      continue;
+    }
+    if (position.lookFor(LOOK_CONSTRUCTION_SITES).length > 0) continue;
+
+    if (room.createConstructionSite(spot.x, spot.y, STRUCTURE_CONTAINER) === OK) open++;
+  }
+
+  return open;
 }
 
 /** 这条路线上磨损最重的一格，给派驻的拓荒者修 */

@@ -1,6 +1,15 @@
 import { assert } from "chai";
 import { COMMANDS, helpText } from "../../src/cli/commands";
-import { estimateTicksToLevel, formatDuration, panelWidth, progressBar, sampleProgress } from "../../src/managers/panel";
+import {
+  compactNumber,
+  estimateTicksToLevel,
+  formatDuration,
+  panelOrigin,
+  panelWidth,
+  progressBar,
+  sampleProgress
+} from "../../src/managers/panel";
+import { announceDeploy } from "../../src/utils/deploy";
 import { announce, escapeHtml, shouldLog } from "../../src/utils/logger";
 import { decodeCells, encodeCells } from "../../src/planner/roads";
 import { LOG_LEVELS, VISUAL_MODULES, settings } from "../../src/utils/settings";
@@ -118,16 +127,24 @@ describe("升级 ETA", () => {
     assert.equal(estimateTicksToLevel({ tick: 1, progress: 1000, rate: 5 }, 1000, 1000), 0);
   });
 
-  it("时长格式同时带 tick 和人类时间", () => {
+  it("时长用人类可读单位，短时才带 t", () => {
     assert.match(formatDuration(10), /10t/);
-    assert.match(formatDuration(1000), /m/);
+    assert.match(formatDuration(1000), /^\d+m$/);
     assert.match(formatDuration(100000), /h|d/);
   });
 
   it("进度条长度固定", () => {
-    assert.equal(progressBar(0), "[----------]");
-    assert.equal(progressBar(0.5), "[#####-----]");
-    assert.equal(progressBar(1), "[##########]");
+    assert.equal(progressBar(0), "░░░░░░░░░░");
+    assert.equal(progressBar(0.5), "█████░░░░░");
+    assert.equal(progressBar(1), "██████████");
+    assert.equal(progressBar(0.5).length, 10);
+  });
+
+  it("大数缩写省面板宽度", () => {
+    assert.equal(compactNumber(42), "42");
+    assert.equal(compactNumber(1500), "1.5k");
+    assert.equal(compactNumber(12400), "12k");
+    assert.equal(compactNumber(2_500_000), "2.5M");
   });
 });
 
@@ -252,6 +269,36 @@ describe("面板底框", () => {
     const ascii = panelWidth([{ text: "abcde", color: "#fff" }]);
 
     assert.isAbove(chinese, ascii);
+  });
+
+  it("落点钉在左上角，不跟着控制器走", () => {
+    const origin = panelOrigin(12, 8);
+    assert.isBelow(origin.x, 1, "贴左边");
+    assert.isBelow(origin.y, 1.2, "贴顶边");
+  });
+});
+
+describe("deploy announce", () => {
+  beforeEach(() => {
+    (global as any).Memory = { settings: { level: "info" } };
+  });
+
+  it("announces once per global boot", () => {
+    let logs = 0;
+    const prev = console.logUnsafe;
+    console.logUnsafe = () => {
+      logs++;
+    };
+
+    try {
+      announceDeploy();
+      assert.equal(logs, 1);
+
+      announceDeploy();
+      assert.equal(logs, 1, "同一次加载不重复");
+    } finally {
+      console.logUnsafe = prev;
+    }
   });
 });
 

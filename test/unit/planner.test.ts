@@ -2,7 +2,7 @@ import { assert } from "chai";
 import { BUNKER_STRUCTURES, FIRST_SPAWN_OFFSET } from "../../src/planner/bunkerLayout";
 import { canPlaceBunker, isBunkerCell, rankAnchors, structuresForLevel } from "../../src/planner/bunkerPlanner";
 import { planMiningSpotsOnly, planOutposts } from "../../src/planner/outposts";
-import { unlockLevel } from "../../src/planner/roomPlanner";
+import { constructionOrder, unlockLevel } from "../../src/planner/roomPlanner";
 import {
   ROOM_SIZE,
   TERRAIN_PLAIN,
@@ -161,6 +161,34 @@ describe("bunker 布局", () => {
       if (structure.type === "container") continue;
       assert.equal(unlockLevel(structure), structure.rcl, structure.type);
     }
+  });
+
+  it("extension 先于矿边容器，矿边容器仍先于 bunker 缓冲桶", () => {
+    const room = {
+      memory: {
+        miningSpots: { s1: { x: 10, y: 10 } },
+        upgradeSpot: { x: 14, y: 21 }
+      }
+    } as unknown as Room;
+
+    const extension = {
+      structureType: "extension",
+      pos: { x: 20, y: 20 },
+      room
+    } as unknown as ConstructionSite;
+    const mining = {
+      structureType: "container",
+      pos: { x: 10, y: 10 },
+      room
+    } as unknown as ConstructionSite;
+    const bunker = {
+      structureType: "container",
+      pos: { x: 25, y: 25 },
+      room
+    } as unknown as ConstructionSite;
+
+    assert.isBelow(constructionOrder(extension), constructionOrder(mining), "先抬孵化上限");
+    assert.isBelow(constructionOrder(mining), constructionOrder(bunker), "矿边桶仍比空缓冲桶急");
   });
 
   it("第一个 spawn 的偏移与布局数据一致", () => {

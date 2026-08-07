@@ -298,8 +298,8 @@ describe("旗子指令", () => {
     assert.notInclude(Game.rooms.W1N1.memory.remotes ?? [], "W1N2");
   });
 
-  it("remote 旗不让旁边的弱分房抢走，交给开得起外矿的家", () => {
-    // E27S36 贴着新分房时，只按距离会让 RCL1 接旗——分房造不出远程矿工，主家又没名单
+  it("remote 旗不让旁边的弱分房抢走，交给更高等级的家", () => {
+    // E27S36 贴着新分房时，只按距离会让 RCL1 接旗——分房孵化窄，主家更适合养挖运/预定
     Game.rooms.W1N0 = ownedRoom("W1N0", 1) as Room;
     Memory.rooms.W1N2 = {
       scouted: 1,
@@ -314,8 +314,8 @@ describe("旗子指令", () => {
 
     runFlagDirectives();
 
-    assert.include(Game.rooms.W1N1.memory.remotes ?? [], "W1N2", "RCL4 的主家承接");
-    assert.isUndefined(Game.rooms.W1N0.memory.remotes, "RCL1 分房不能开外矿");
+    assert.include(Game.rooms.W1N1.memory.remotes ?? [], "W1N2", "高等级主家承接");
+    assert.isUndefined(Game.rooms.W1N0.memory.remotes, "同场有更高等级家时分房不抢旗");
     assert.equal(Memory.rooms.W1N2.home, "W1N1");
   });
 
@@ -393,6 +393,99 @@ describe("孵化队列", () => {
     assert.isAbove(slots.find(slot => slot.role === next)?.deficit ?? 0, 0);
     // 没有 hauler 时应急 harvester 配额会亮，它排在 miner 前面
     assert.equal(next, "harvester");
+  });
+
+  it("scout 和外矿挖运排在建造/升级前面", () => {
+    const scout = SPAWN_PRIORITY.indexOf("scout");
+    const remoteMiner = SPAWN_PRIORITY.indexOf("remoteMiner");
+    const remoteHauler = SPAWN_PRIORITY.indexOf("remoteHauler");
+    const builder = SPAWN_PRIORITY.indexOf("builder");
+    const upgrader = SPAWN_PRIORITY.indexOf("upgrader");
+
+    assert.isBelow(scout, remoteMiner);
+    assert.isBelow(remoteMiner, remoteHauler);
+    assert.isBelow(remoteHauler, builder);
+    assert.isBelow(scout, upgrader);
+  });
+});
+
+describe("早期外矿分阶段配额", () => {
+  class FakePosition {
+    public constructor(public x: number, public y: number, public roomName: string) {}
+  }
+
+  let saved: { Game: unknown; Memory: unknown; RoomPosition: unknown };
+
+  beforeEach(() => {
+    installGameConstants();
+    const context = global as unknown as typeof saved;
+    saved = { Game: context.Game, Memory: context.Memory, RoomPosition: context.RoomPosition };
+    context.Game = {
+      creeps: {},
+      time: 800000,
+      rooms: {},
+      map: { describeExits: () => ({ 1: "W1N2" }), getRoomLinearDistance: () => 1 }
+    };
+    context.Memory = {
+      rooms: {
+        W1N2: {
+          scouted: 1,
+          sources: { sRemote: { x: 10, y: 10 } },
+          home: "W1N1"
+        }
+      }
+    };
+    context.RoomPosition = FakePosition;
+  });
+
+  afterEach(() => {
+    Object.assign(global, saved);
+  });
+
+  function roomAt(level: number): Room {
+    return {
+      name: "W1N1",
+      controller: { level, my: true, ticksToDowngrade: 30000 },
+      energyAvailable: level >= 2 ? 550 : 300,
+      energyCapacityAvailable: level >= 2 ? 550 : 300,
+      memory: { remotes: ["W1N2"], anchor: { x: 25, y: 25 } },
+      find: (type: number) => {
+        if (type === FIND_SOURCES) return [{ id: "s1" }, { id: "s2" }];
+        return [];
+      }
+    } as unknown as Room;
+  }
+
+  function quotaOf(target: Room, role: CreepRole): number {
+    return spawnQueue(target).slots.find(slot => slot.role === role)?.quota ?? 0;
+  }
+
+  it("RCL1 有外矿时用跨房 harvester，不派 remoteMiner / reserver", () => {
+    const home = roomAt(1);
+    (global as unknown as { Game: { rooms: Record<string, Room> } }).Game.rooms.W1N1 = home;
+
+    assert.isAbove(quotaOf(home, "harvester"), 1, "应急 1 + 外矿路程定编");
+    assert.equal(quotaOf(home, "remoteMiner"), 0);
+    assert.equal(quotaOf(home, "remoteHauler"), 0);
+    assert.equal(quotaOf(home, "reserver"), 0);
+  });
+
+  it("RCL2 有外矿时走 remoteMiner + remoteHauler，仍不预定", () => {
+    const home = roomAt(2);
+    (global as unknown as { Game: { rooms: Record<string, Room> } }).Game.rooms.W1N1 = home;
+    Memory.rooms.W1N2.pathLen = 40;
+
+    assert.equal(quotaOf(home, "remoteMiner"), 1);
+    assert.isAbove(quotaOf(home, "remoteHauler"), 0, "不等矿边桶：掉落蒸发正是最该有人去拉的时候");
+    assert.equal(quotaOf(home, "reserver"), 0);
+  });
+
+  it("RCL3 才给预定员名额", () => {
+    const home = roomAt(3);
+    (global as unknown as { Game: { rooms: Record<string, Room> } }).Game.rooms.W1N1 = home;
+
+    assert.equal(quotaOf(home, "remoteMiner"), 1);
+    assert.equal(quotaOf(home, "reserver"), 1);
   });
 });
 

@@ -81,6 +81,8 @@ const VALUE_CONSTANTS: Record<string, string | number> = {
   STRUCTURE_RAMPART: "rampart",
   STRUCTURE_WALL: "constructedWall",
   STRUCTURE_ROAD: "road",
+  STRUCTURE_INVADER_CORE: "invaderCore",
+  STRUCTURE_KEEPER_LAIR: "keeperLair",
   WORK: "work",
   CARRY: "carry",
   MOVE: "move",

@@ -11,11 +11,14 @@ import {
   dismantlerQuota,
   isReserved,
   nextScoutTarget,
+  remoteCoreTarget,
   remoteDefenseTarget,
   remoteEvictTarget,
+  remoteHarvestersNeeded,
   remoteHaulersNeeded,
   reserverQuota,
   unassignedBreachTarget,
+  unassignedRemoteHarvesterSource,
   unassignedRemoteSource,
   unassignedReserveTarget
 } from "./remote";
@@ -113,8 +116,12 @@ const RCL8_UPGRADE_WORK = 15;
 function quotaFor(room: Room, counts: Record<CreepRole, number>): Record<CreepRole, number> {
   const sites = room.find(FIND_MY_CONSTRUCTION_SITES).length;
   const sources = room.find(FIND_SOURCES).length;
+  const level = room.controller?.level ?? 0;
 
   const remoteSources = activeRemoteSources(room).length;
+  // RCL1：跨房 harvester 自挖自送；RCL2+：remoteMiner + remoteHauler
+  const earlyRemote = level < 2;
+  const splitRemote = !earlyRemote && remoteSources > 0;
 
   return {
     defender: defenderQuota(room),
@@ -126,8 +133,8 @@ function quotaFor(room: Room, counts: Record<CreepRole, number>): Record<CreepRo
     hauler: haulerQuota(room) + reliefSlots(room, "hauler"),
     // 侦察兵只在真有房间要探时才派，五十能量的东西不值得常备
     scout: nextScoutTarget(room) ? 1 : 0,
-    remoteMiner: remoteSources,
-    remoteHauler: remoteSources > 0 ? remoteHaulersNeeded(room) : 0,
+    remoteMiner: splitRemote ? remoteSources : 0,
+    remoteHauler: splitRemote ? remoteHaulersNeeded(room) : 0,
     // 一个房间一个预定员，预定是按房间生效的，源再多也只要按住一次；
     // 换人那一趟会短暂地多出一个，接班的得赶在预定断档前走完通勤路
     reserver: reserverQuota(room),
@@ -139,9 +146,8 @@ function quotaFor(room: Room, counts: Record<CreepRole, number>): Record<CreepRo
     pioneer: pioneerQuota(room),
     // 搬空前人仓库是限时的白捡收入，抢完归零
     looter: looterQuota(room),
-    // 矿工挖的能量堆在地上，没人捡就填不进 spawn，光有矿工孵化不出下一个 creep。
-    // 搬运工断档时先补一个自给自足的 harvester 把链条接上。
-    harvester: counts.hauler === 0 ? 1 : 0,
+    // 搬运工断档时先补一个本房应急 harvester；RCL1 外矿另加路程定编的跨房名额
+    harvester: (counts.hauler === 0 ? 1 : 0) + (earlyRemote ? remoteHarvestersNeeded(room) : 0),
     upgrader: upgraderQuota(room, sites),
     // 产出被吃光时留一个就够：两个 builder 每 tick 烧 10 点，正好是一个能量源的
     // 全部再生量，而工地慢几百 tick 建完不影响房间存活
@@ -185,17 +191,23 @@ function guardianQuota(room: Room, counts: Record<CreepRole, number>): number {
 
   const relief = colonyDefenders(room);
   const defend = remoteDefenseTarget(room);
+  const core = remoteCoreTarget(room);
   const evict = remoteEvictTarget(room);
 
-  // 分房驰援、外矿抗争、外矿驱赶可能同时亮且房间不同，缺口相加
+  // 分房驰援、外矿抗争、清核、驱赶可能同时亮且房间不同，缺口相加
   let wanted = relief?.count ?? 0;
   if (defend) {
     if (!relief || relief.target !== defend.target) wanted += defend.count;
     else wanted = Math.max(wanted, defend.count);
   }
-  if (evict && (!relief || relief.target !== evict) && (!defend || defend.target !== evict)) {
+  const tasked = new Set<string>();
+  if (relief) tasked.add(relief.target);
+  if (defend) tasked.add(defend.target);
+  if (core && !tasked.has(core)) {
     wanted += 1;
+    tasked.add(core);
   }
+  if (evict && !tasked.has(evict)) wanted += 1;
   return wanted;
 }
 
@@ -332,45 +344,29 @@ function haulerQuota(room: Room): number {
  *
  * defender 排最前，因为它只在挨打时才有配额，那种时候没有比它更急的事。
  *
- * harvester 排第二不是因为它效率高，恰恰相反——它只在搬运工断档时才有配额，
- * 那种时候需要的正是一个不依赖别人、自己挖自己送的角色来重启生产链。
+ * harvester 排第二：应急重启产线，以及 RCL1 跨房自挖自送。
  *
- * builder 紧跟本土产线和协防：本级 extension / tower / storage 晚一天，整房
- * 效率差一截。拓荒和搬仓都得让路——主房建筑没铺完就去扶分房，两边都半吊子。
- *
- * 外矿那三个排在全部本土角色之后。外矿是锦上添花，家里的产线还没配齐就
- * 往外派人，等于把本来该变成 extension 的能量拿去补一条更长更脆的运输线。
+ * 本房闭环之后立刻 scout → 外矿挖运：邻房不探就自动加不了外矿；挖运再往后会被
+ * 建造/升级挤掉。预定紧跟外矿挖运。协防与建造仍压过占领/拓荒/升级。
  */
 export const SPAWN_PRIORITY: CreepRole[] = [
   "defender",
   "harvester",
   "miner",
   "hauler",
-  // 协防兵排在本土产线三件套之后：老家先保住自己的挖—运—孵化闭环，再谈驰援。
-  // 它的配额本身已经卡了"老家没断链、本土没挨打"两道闸；守卫是分房唯一
-  // 压过本房建造的外援——没人扛着弱房会被打穿
-  "guardian",
-  // 本房建造工：每个 RCL 先把核心建筑铺完，再谈升级和对外扩张
-  "builder",
-  // 占领者便宜且效果不可逆：700 能量换一个永久归属。排在建造之后——
-  // 家里 extension 都没齐时占了新房也养不起，但比拓荒者靠前：claim 窗口会被人截胡
-  "claimer",
-  // 搬仓库有时间窗，但排在本房建造之后：先把家里的 extension 立起来，
-  // 搬回来的能量才有地方花、有更大的孵化预算
-  "looter",
-  // 预定员：一到位外矿产能翻倍，断档比晚派一个 pioneer / upgrader 疼得多。
-  // 排在建造和占领之后、扶持/升级之前——建造高峰期别再把它挤到队列尾巴上，
-  // 不然双 CLAIM 按余量补员会在通勤尽头踩空（E27S36 预定剩 25 tick 才赶到）
-  "reserver",
-  // 拓荒者：分房扶持重要，但主房建筑没铺完时配额会被压住（见 pioneerQuota），
-  // 就算亮了也排在 builder 后面
-  "pioneer",
-  "upgrader",
+  // 先探邻房，自动加外矿才有候选
   "scout",
   "remoteMiner",
   "remoteHauler",
-  // 拆迁工排最后。它砸开的那段墙能让整个外矿产能翻倍，但那是几百 tick 之后的事，
-  // 而排在它前面的每一个角色都是当下就在产出——真缺人的时候先补产线
+  "reserver",
+  // 协防：老家闭环 + 外矿编制之后；配额本身已卡"没断链、本土没挨打"
+  "guardian",
+  "builder",
+  "claimer",
+  "looter",
+  "pioneer",
+  "upgrader",
+  // 拆迁工排最后：砸墙回本慢，真缺人时先补产线
   "dismantler"
 ];
 
@@ -390,7 +386,7 @@ export function runSpawnManager(room: Room): void {
   const quota = quotaFor(room, counts);
   const broken = isChainBroken(counts);
 
-  const role = pickSpawn(counts, quota, broken);
+  const role = pickSpawn(counts, quota, broken, hasCoreBuildPending(room));
   if (!role) return;
 
   // 战斗兵绝不用应急小体型：一个凑合出来的小兵照样打不过，只是把重启产线的
@@ -406,17 +402,21 @@ function isCombat(role: CreepRole): boolean {
 /**
  * 挑这一 tick 该孵谁。
  *
- * 常态就是照 SPAWN_PRIORITY 找第一个缺口。唯一的例外是断链：那时哪怕正挨着打，
- * 也要先把 harvester 抢救回来重启产线，而不是被排在最前的 defender 抢走那点仅剩
- * 的能量——它反正也造不出打得赢的兵，只会让房间一直卡在"孵化不出来"里空转，
- * 这正是 E28S35 死循环的另一半成因。
+ * 常态就是照 SPAWN_PRIORITY 找第一个缺口。两个例外：
+ *   1. 断链时先救 harvester——哪怕正挨着打也不让排最前的 defender 抢走仅剩的能量，
+ *      它反正造不出打得赢的兵，只会让房间卡在"孵化不出来"里空转。
+ *   2. 本房核心建筑还没齐时，builder 插到 remoteHauler 前面——外矿运输编制在
+ *      RCL2 小体型下动辄五六个，照表排会把 extension 工地饿到永远铺不完，
+ *      RCL 上不去运输体型也大不了，恶性循环。矿工照派，先把本房底座垒起来。
  */
 function pickSpawn(
   counts: Record<CreepRole, number>,
   quota: Record<CreepRole, number>,
-  broken: boolean
+  broken: boolean,
+  corePending = false
 ): CreepRole | undefined {
   if (broken && counts.harvester < quota.harvester) return "harvester";
+  if (corePending && counts.builder < quota.builder) return "builder";
 
   return SPAWN_PRIORITY.find(candidate => counts[candidate] < quota[candidate]);
 }
@@ -452,7 +452,7 @@ function spawnCreep(spawn: StructureSpawn, role: CreepRole, isEmergency: boolean
 
   if (result === OK) {
     const where = assignment.targetRoom ? ` 派往 ${assignment.targetRoom}` : "";
-    log.info("孵化", `${room.name} 孵化 ${name}，体型 ${body.length} 部件${where}${isEmergency ? "（应急）" : ""}`);
+    log.debug("孵化", `${room.name} 孵化 ${name}，体型 ${body.length} 部件${where}${isEmergency ? "（应急）" : ""}`);
   }
 }
 
@@ -467,6 +467,14 @@ function assignmentFor(room: Room, role: CreepRole): Partial<CreepMemory> {
   if (role === "reserver") {
     const target = unassignedReserveTarget(room);
     return target ? { targetRoom: target } : {};
+  }
+
+  if (role === "harvester") {
+    // 搬运工断档时第一个 harvester 留本房救急，别绑外矿把产线救火的人派走
+    if (needsHomeEmergencyHarvester(room)) return {};
+
+    const source = unassignedRemoteHarvesterSource(room);
+    return source ? { targetRoom: source.roomName, sourceId: source.sourceId as Id<Source> } : {};
   }
 
   if (role === "remoteMiner") {
@@ -496,14 +504,29 @@ function assignmentFor(room: Room, role: CreepRole): Partial<CreepMemory> {
   return {};
 }
 
+/** 搬运工断档且还没有留守本房的应急 harvester */
+function needsHomeEmergencyHarvester(room: Room): boolean {
+  let haulers = 0;
+  let homeHarvesters = 0;
+
+  for (const creep of Object.values(Game.creeps)) {
+    if (creep.memory.room !== room.name) continue;
+    if (creep.memory.role === "hauler") haulers++;
+    if (creep.memory.role === "harvester" && !creep.memory.targetRoom) homeHarvesters++;
+  }
+
+  return haulers === 0 && homeHarvesters === 0;
+}
+
 /**
- * 协防兵下一趟该去哪：分房驰援 → 外矿武装抗争 → 外矿驱赶。
+ * 协防兵下一趟该去哪：分房驰援 → 外矿武装抗争 → 清 0 级 Invader Core → 外矿驱赶。
  *
  * 孵化认领和清场后重新派活共用这一份，免得闲兵停在分房门口、外矿却没人去打。
  */
 function pickGuardianTarget(home: Room): string | undefined {
   const relief = colonyDefenders(home);
   const defend = remoteDefenseTarget(home);
+  const core = remoteCoreTarget(home);
   const evict = remoteEvictTarget(home);
   const headed = (target: string) =>
     Object.values(Game.creeps).some(
@@ -515,9 +538,11 @@ function pickGuardianTarget(home: Room): string | undefined {
 
   if (relief && !headed(relief.target)) return relief.target;
   if (defend && !headed(defend.target)) return defend.target;
+  if (core && !headed(core)) return core;
   if (evict && !headed(evict)) return evict;
   if (relief) return relief.target;
   if (defend) return defend.target;
+  if (core) return core;
   if (evict) return evict;
   return undefined;
 }
@@ -618,7 +643,7 @@ export function spawnQueue(room: Room): { next: CreepRole | undefined; slots: Sp
     quota: quota[role],
     deficit: Math.max(0, quota[role] - counts[role])
   }));
-  const next = SPAWN_PRIORITY.find(role => counts[role] < quota[role]);
+  const next = pickSpawn(counts, quota, isChainBroken(counts), hasCoreBuildPending(room));
 
   return { next, slots };
 }

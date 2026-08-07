@@ -48,3 +48,4 @@ PowerShell 不要用 `&&` 链命令（旧版会解析失败）；用 `;` 或分�
 - 动了物流阈值 / 建造优先 → 同步单测 + 必要时 probe。
 - 动了孵化优先级 / 配额 → `test/unit/maintenance.test.ts`、`expansion.test.ts`。
 - 动了角色体型 → `bodyFor` 相关单测（MOVE 比例、filler）。
+- 上线后控制台会打一行 `[INFO][系统] 代码已加载`（global 重置时，含代码上传）。

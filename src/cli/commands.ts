@@ -178,7 +178,7 @@ export const COMMANDS: Record<string, Command> = {
   },
   "remote.add": {
     usage: "remote.add(target, room?)",
-    describe: "手动把房间加进外矿名单（被别人预定的会去抢预定；被占领的加不了）",
+    describe: "手动把房间加进外矿名单（抢预定 / 清 0 级 Invader Core；据点与占领房加不了）",
     run: (target, roomName) => {
       if (!target) return "用法：remote.add(target, room?)";
 
@@ -187,21 +187,28 @@ export const COMMANDS: Record<string, Command> = {
 
       const memory = Memory.rooms[target];
       if (!memory?.scouted) return `${target} 还没侦察过，等 scout 去过再加`;
-      // reserved 放行去抢；owned / keeper / core / none 那种预定员搞不定的拒绝
-      if (memory.unusable && memory.unusable !== "reserved") {
+      const clearableCore = memory.unusable === "core" && memory.coreLevel === 0;
+      // reserved / 0 级 core 放行；owned / keeper / 据点 / none 拒绝
+      if (memory.unusable && memory.unusable !== "reserved" && !clearableCore) {
         return `${target} 采不了：${memory.unusable}`;
       }
 
       const remotes = room.memory.remotes ?? [];
       if (remotes.includes(target) && memory.home === room.name) {
-        return memory.unusable === "reserved" ? `${target} 已经在名单里（抢预定中）` : `${target} 已经在名单里`;
+        if (memory.unusable === "reserved") return `${target} 已经在名单里（抢预定中）`;
+        if (clearableCore) return `${target} 已经在名单里（清核中）`;
+        return `${target} 已经在名单里`;
       }
 
       enableRemote(room, target);
       const list = (room.memory.remotes ?? []).join(" ");
-      return memory.unusable === "reserved"
-        ? `${room.name} 外矿名单 → ${list}（${target} 被别人预定，派预定员去抢）`
-        : `${room.name} 外矿名单 → ${list}`;
+      if (memory.unusable === "reserved") {
+        return `${room.name} 外矿名单 → ${list}（${target} 被别人预定，派预定员去抢）`;
+      }
+      if (clearableCore) {
+        return `${room.name} 外矿名单 → ${list}（${target} 有 0 级 Invader Core，派协防兵清）`;
+      }
+      return `${room.name} 外矿名单 → ${list}`;
     }
   },
   "remote.drop": {
