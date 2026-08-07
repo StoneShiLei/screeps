@@ -134,6 +134,8 @@ interface RoomMemory {
    * 也只用清掉自己这一段。读的时候两份取并集。
    */
   remoteRoads?: string;
+  /** 外矿路规划算法版本；低于代码里的 REMOTE_ROADS_REV 时有视野会重算 */
+  remoteRoadsRev?: number;
   /** 上次检查建造进度的 tick，用来控制检查频率 */
   lastBuildCheck?: number;
   /** 上次播报时房间里的敌人数量，数量没变就不重复刷屏 */

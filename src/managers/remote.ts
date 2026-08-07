@@ -15,6 +15,7 @@ import { bodyFor, maxRepeatFor } from "../utils/body";
 import { commuteTo, travelTo } from "../movement/move";
 import { defendersNeeded, hostilesIn, intrudersIn } from "../roles/defender";
 import {
+  REMOTE_ROADS_REV,
   maintainRemoteSites,
   planRemoteMiningSpots,
   planRemoteRoads,
@@ -60,10 +61,11 @@ const WATCH_INTERVAL = 100;
 const MAX_REMOTE_DISTANCE = 90;
 
 /** 中立房间的源：1500 容量、300 tick 再生，平均每 tick 就这么多 */
-const NEUTRAL_SOURCE_RATE = 5;
+/** 中立外矿源每 tick 再生量（1500/300） */
+export const NEUTRAL_SOURCE_RATE = 5;
 
 /** 预定之后源容量恢复到 3000，产能正好翻倍，和自家房间一样 */
-const RESERVED_SOURCE_RATE = 10;
+export const RESERVED_SOURCE_RATE = 10;
 
 /**
  * 派往已预定外矿的矿工带几个 WORK。
@@ -877,6 +879,10 @@ export function watchRemote(room: Room): void {
     // 旧外矿可能只有路没有落点：有视野时补算一次
     if (!room.memory.miningSpots && room.memory.sources) {
       planRemoteMiningSpots(home, room.name);
+    }
+    // 路规划算法升级后重算一遍（比如跨房出口对齐），两万 ops 只跑一次
+    if ((memory.remoteRoadsRev ?? 0) < REMOTE_ROADS_REV && memory.sources) {
+      planRemoteRoads(home, room.name);
     }
     maintainRemoteSites(room, home.controller?.level ?? 0, ROAD_MIN_LEVEL);
   }

@@ -4,7 +4,9 @@
  */
 
 import {
+  NEUTRAL_SOURCE_RATE,
   RESERVED_MINER_WORK,
+  RESERVED_SOURCE_RATE,
   activeRemoteSources,
   dismantlerQuota,
   isReserved,
@@ -47,12 +49,28 @@ const BACKLOG_PER_HAULER = 1500;
 /** 同时最多几个防御兵，再多也围不上同一个敌人 */
 const MAX_DEFENDERS = 3;
 
-/** 核心建筑建完、能量没别处去时的升级工人数 */
-const UPGRADER_IDLE = 4;
+/** 升级工编制硬顶：再多也站不满粮仓一圈，且收入很少撑得住 */
+const UPGRADER_MAX = 4;
 
 /** 产出被吃光、或只为顶降级时的最低编制 */
 const UPGRADER_STARVED = 1;
 const BUILDER_STARVED = 1;
+
+/** 本房源每 tick 再生（3000/300），和预定外矿同速 */
+const OWN_SOURCE_RATE = 10;
+
+/**
+ * 常态下升级最多吃掉收入的这一份，剩下留给 spawn / 路 / 外矿运力。
+ *
+ * 4 个 8 WORK 静态升级工要 32/tick，双矿只有 20——不砍编制就只能罚站等粮。
+ */
+const UPGRADE_SHARE = 0.55;
+
+/** 仓里囤得多或粮仓满时可以提高份额，把余量烧成 GCL */
+const UPGRADE_SHARE_SURPLUS = 0.85;
+
+/** storage 超过这个算有盈余，可以多养几个升级工 */
+const STORAGE_SURPLUS = 10000;
 
 /** 有建造任务时的建造工人数：升级停手省下的能量正好多养一个 */
 const BUILDER_BUSY = 3;
@@ -182,14 +200,13 @@ function guardianQuota(room: Room, counts: Record<CreepRole, number>): number {
 }
 
 /**
- * 升级工的人数看房间在忙什么。
+ * 升级工的人数看房间在忙什么，再按可持续收入封顶。
  *
- * 每个 RCL 先把核心建筑铺完：extension / tower / storage / 容器晚一天，整房
- * 运转差一截。建造期间升级工归零，只在快掉级时留一个顶住；核心建筑清空
- * 之后再把人补回来全力推下一级。
+ * 每个 RCL 先把核心建筑铺完；建造期间归零，只在快掉级时留一个。
+ * 核心建完后不再写死 4 人——钉站多 WORK 的静态升级工按人头线性烧能量，
+ * 必须用本房+外矿收入卡编制，否则粮仓见底只能罚站。
  *
- * 最后再被站位数卡一道：控制器旁边站不下的人只能在外围干等，
- * 既升不了级又白吃孵化费。
+ * 最后再被站位数卡一道：控制器旁边站不下的人只能在外围干等。
  */
 function upgraderQuota(room: Room, sites: number): number {
   if (room.controller?.level === 8) return RCL8_UPGRADERS;
@@ -211,10 +228,36 @@ function desiredUpgraders(room: Room, sites: number): number {
   // 产出被吃光时收到最低，别让编制卡在超编状态把矿边抽干
   if (isStarved(room)) return UPGRADER_STARVED;
 
-  // 粮仓满着说明运进来的比用掉的多，这时候压着人数就是让能量烂在容器里
-  if (isGranaryFull(room)) return UPGRADER_IDLE;
+  const work = Math.max(
+    1,
+    bodyFor("upgrader", room.energyCapacityAvailable).filter(part => part === "work").length
+  );
+  const surplus =
+    (room.storage?.store[RESOURCE_ENERGY] ?? 0) >= STORAGE_SURPLUS || isGranaryFull(room);
 
-  return UPGRADER_IDLE;
+  return Math.min(upgradersAffordable(upgradeIncome(room), work, surplus), UPGRADER_MAX);
+}
+
+/**
+ * 按可持续收入算养得起几个升级工。
+ *
+ * wanted = max(1, floor(income × share / workPerCreep))
+ */
+export function upgradersAffordable(income: number, workPerCreep: number, surplus: boolean): number {
+  const work = Math.max(1, workPerCreep);
+  const share = surplus ? UPGRADE_SHARE_SURPLUS : UPGRADE_SHARE;
+  return Math.max(1, Math.floor((income * share) / work));
+}
+
+/** 本房源 + 在采外矿的每 tick 再生合计 */
+export function upgradeIncome(room: Room): number {
+  let income = room.find(FIND_SOURCES).length * OWN_SOURCE_RATE;
+
+  for (const entry of activeRemoteSources(room)) {
+    income += isReserved(entry.roomName) ? RESERVED_SOURCE_RATE : NEUTRAL_SOURCE_RATE;
+  }
+
+  return income;
 }
 
 /**

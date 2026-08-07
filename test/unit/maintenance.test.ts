@@ -5,7 +5,7 @@ import { flagHelpText, runFlagDirectives } from "../../src/managers/flags";
 import { installGameConstants } from "./mock";
 import { isPlanned } from "../../src/planner/roomPlanner";
 import { isRetiring, reliefSlots, ticksPerStep } from "../../src/managers/relief";
-import { SPAWN_PRIORITY, spawnQueue } from "../../src/managers/spawnManager";
+import { SPAWN_PRIORITY, spawnQueue, upgradersAffordable } from "../../src/managers/spawnManager";
 
 /** 一个只有 memory 的假房间，isPlanned 要的就是图纸 */
 function planned(memory: Partial<RoomMemory>): Room {
@@ -493,11 +493,11 @@ describe("产出被吃光时收编制", () => {
     assert.equal(quotaOf(critical, "builder"), 3);
   });
 
-  it("核心建筑建完才放开升级工", () => {
+  it("核心建筑建完后按收入养升级工，不再写死四人", () => {
     const idle = room(1000, 90, 0);
 
-    // 编制想要 4 个，但站位只有 3 个，多出来的站在外围干瞪眼
-    assert.equal(quotaOf(idle, "upgrader"), 3);
+    // 双矿 20/tick、800 预算约 7 WORK：floor(20*0.55/7)=1，站位 3 不再是瓶颈
+    assert.equal(quotaOf(idle, "upgrader"), 1);
     assert.equal(quotaOf(idle, "builder"), 0);
   });
 
@@ -505,14 +505,55 @@ describe("产出被吃光时收编制", () => {
     // 粮仓空可能只是升级工换班的间隙，矿边还堆着两千说明运力才是瓶颈
     const backlogged = room(0, 2000, 0);
 
-    assert.equal(quotaOf(backlogged, "upgrader"), 3);
+    assert.equal(quotaOf(backlogged, "upgrader"), 1, "不饿时仍按收入封顶");
     assert.equal(quotaOf(backlogged, "builder"), 0);
   });
 
-  it("storage 里有余量时不算吃紧，别误压升级编制", () => {
+  it("storage 里有余量时不算吃紧，别误压到饥饿编制", () => {
     const buffered = room(100, 90, 0);
     (buffered as { storage?: { store: { energy: number } } }).storage = { store: { energy: 5000 } };
 
-    assert.equal(quotaOf(buffered, "upgrader"), 3, "仓里有货说明产线没塌");
+    // 5000 够证明产线没塌（不进 isStarved），但未到盈余线，人数仍按常态份额
+    assert.equal(quotaOf(buffered, "upgrader"), 1, "仓里有货说明产线没塌");
+  });
+
+  it("storage 囤得多时提高升级份额", () => {
+    const fat = room(1000, 90, 0);
+    (fat as { storage?: { store: { energy: number } } }).storage = { store: { energy: 15000 } };
+
+    // floor(20*0.85/7)=2
+    assert.equal(quotaOf(fat, "upgrader"), 2);
+  });
+
+  it("外矿预定后收入上去，升级工可以多养一个", () => {
+    const idle = room(1000, 90, 0);
+    idle.memory.remotes = ["W1N2"];
+    (Memory.rooms as Record<string, RoomMemory>).W1N2 = {
+      home: idle.name,
+      sources: { s: { x: 10, y: 10 } },
+      reserveEnds: Game.time + 2000
+    };
+
+    // 双矿 20 + 预定外矿 10 = 30，floor(30*0.55/7)=2
+    assert.equal(quotaOf(idle, "upgrader"), 2);
+  });
+});
+
+describe("升级工收入缩放", () => {
+  it("常态份额大约一半收入，双矿养不起两个七 WORK", () => {
+    assert.equal(upgradersAffordable(20, 7, false), 1);
+  });
+
+  it("盈余份额可以提高到两人", () => {
+    assert.equal(upgradersAffordable(20, 7, true), 2);
+  });
+
+  it("WORK 更大时同样收入养更少人", () => {
+    assert.equal(upgradersAffordable(20, 8, false), 1);
+    assert.equal(upgradersAffordable(30, 8, false), 2);
+  });
+
+  it("至少留一个，避免收入抖动掉到零", () => {
+    assert.equal(upgradersAffordable(5, 8, false), 1);
   });
 });

@@ -42,6 +42,11 @@ const MAX_ROAD_SITES = 2;
 const REPAIR_THRESHOLD = 0.6;
 
 /**
+ * 外矿路规划算法版本。涨一号就会在有视野时重算一遍，用来修跨房错位这类存量问题。
+ */
+export const REMOTE_ROADS_REV = 1;
+
+/**
  * 算出从这个外矿到基地的路，按房间分段存进各自的 Memory。
  *
  * 只在启用外矿时算一次。跨房间寻路要两万 ops，不是每 tick 能跑的东西。
@@ -59,6 +64,21 @@ export function planRemoteRoads(home: Room, roomName: string): void {
   const byRoom = new Map<string, Map<string, Coord>>();
   const matrices = new Map<string, CostMatrix>();
 
+  const remember = (name: string, x: number, y: number): void => {
+    // 房间交界那圈不铺：站上去就换房间了，路面留不住人也建不了工地
+    if (x === 0 || y === 0 || x === ROOM_SIZE - 1 || y === ROOM_SIZE - 1) return;
+    // 基地自己那圈路由布局表管
+    if (name === home.name && isBunkerCell(anchor.x, anchor.y, x, y)) return;
+
+    const cells = byRoom.get(name) ?? new Map<string, Coord>();
+    cells.set(`${x},${y}`, { x, y });
+    byRoom.set(name, cells);
+
+    // 后一条路线看到前一条已经铺过的格子就会拐过来汇进同一条主干，
+    // 而不是各走一条平行线——那样要多花一倍能量，维修面积也大一倍
+    matrices.get(name)?.set(x, y, ROAD_COST);
+  };
+
   for (const spot of Object.values(sources)) {
     const from = new RoomPosition(spot.x, spot.y, roomName);
     const result = PathFinder.search(from, entrances, {
@@ -75,19 +95,11 @@ export function planRemoteRoads(home: Room, roomName: string): void {
     }
 
     for (const step of result.path) {
-      // 房间交界那圈不铺：站上去就换房间了，路面留不住人也建不了工地
-      if (step.x === 0 || step.y === 0 || step.x === ROOM_SIZE - 1 || step.y === ROOM_SIZE - 1) continue;
-      // 基地自己那圈路由布局表管
-      if (step.roomName === home.name && isBunkerCell(anchor.x, anchor.y, step.x, step.y)) continue;
-
-      const cells = byRoom.get(step.roomName) ?? new Map<string, Coord>();
-      cells.set(`${step.x},${step.y}`, { x: step.x, y: step.y });
-      byRoom.set(step.roomName, cells);
-
-      // 后一条路线看到前一条已经铺过的格子就会拐过来汇进同一条主干，
-      // 而不是各走一条平行线——那样要多花一倍能量，维修面积也大一倍
-      matrices.get(step.roomName)?.set(step.x, step.y, ROAD_COST);
+      remember(step.roomName, step.x, step.y);
     }
+    // 出口格本身不铺，但两侧进房一格必须钉在同一条出口轴上，
+    // 否则 PathFinder 对角跨房后两边路会对不齐（E27S36 y=29 / E28S36 y=30）
+    alignBorderApproaches(result.path, remember);
   }
 
   for (const [name, cells] of byRoom) {
@@ -95,8 +107,61 @@ export function planRemoteRoads(home: Room, roomName: string): void {
     memory.remoteRoads = encodeCells([...cells.values()]);
   }
 
+  const remoteMemory = (Memory.rooms[roomName] ??= {} as RoomMemory);
+  remoteMemory.remoteRoadsRev = REMOTE_ROADS_REV;
+
   const total = [...byRoom.values()].reduce((sum, cells) => sum + cells.size, 0);
   log.info("外矿", `${roomName} → ${home.name} 的路线规划完毕，共 ${total} 格，跨 ${byRoom.size} 个房间`);
+}
+
+/**
+ * 出口格往房间里缩一格。交界圈本身不铺路，对接靠这一格对齐。
+ */
+export function inwardFromExit(x: number, y: number): Coord | undefined {
+  if (x === 0) return { x: 1, y };
+  if (x === ROOM_SIZE - 1) return { x: ROOM_SIZE - 2, y };
+  if (y === 0) return { x, y: 1 };
+  if (y === ROOM_SIZE - 1) return { x, y: ROOM_SIZE - 2 };
+  return undefined;
+}
+
+/**
+ * 跨房处两侧各钉一格，共享出口轴（东西邻房同 y，南北邻房同 x）。
+ *
+ * PathFinder 允许对角进出，路径里房内第一格的次坐标可能和出口不一致；
+ * 只按路径原样铺就会出现两边路错开一行。
+ */
+export function alignBorderApproaches(
+  path: { x: number; y: number; roomName: string }[],
+  remember: (roomName: string, x: number, y: number) => void
+): void {
+  for (let i = 0; i < path.length - 1; i++) {
+    const a = path[i];
+    const b = path[i + 1];
+    if (a.roomName === b.roomName) continue;
+
+    const inwardA = inwardFromExit(a.x, a.y);
+    const inwardB = inwardFromExit(b.x, b.y);
+    if (inwardA) remember(a.roomName, inwardA.x, inwardA.y);
+    if (inwardB) remember(b.roomName, inwardB.x, inwardB.y);
+    if (inwardA && inwardB) continue;
+
+    // 路径偶尔跳过出口格，按邻接方向用离开侧的次坐标对齐两侧
+    const dir = Game.map.findExit(a.roomName, b.roomName);
+    if (dir === FIND_EXIT_RIGHT) {
+      remember(a.roomName, ROOM_SIZE - 2, a.y);
+      remember(b.roomName, 1, a.y);
+    } else if (dir === FIND_EXIT_LEFT) {
+      remember(a.roomName, 1, a.y);
+      remember(b.roomName, ROOM_SIZE - 2, a.y);
+    } else if (dir === FIND_EXIT_BOTTOM) {
+      remember(a.roomName, a.x, ROOM_SIZE - 2);
+      remember(b.roomName, a.x, 1);
+    } else if (dir === FIND_EXIT_TOP) {
+      remember(a.roomName, a.x, 1);
+      remember(b.roomName, a.x, ROOM_SIZE - 2);
+    }
+  }
 }
 
 /**
